@@ -132,6 +132,12 @@ def main():
     # print(forest_map.get_tuples())
     print(forest_map.get_human_readable())
 
+    instance = X.iloc[0]
+    valuation = forest_map.evaluate_instance(instance)
+
+    print("\nValoração da floresta para a instância:")
+    print(valuation)
+
 if __name__ == "__main__":
     main()
 

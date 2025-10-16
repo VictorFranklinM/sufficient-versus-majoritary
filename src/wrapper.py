@@ -73,6 +73,21 @@ class ForestFeatureThresholdMap:
             feat_name = self.feature_names[feat_idx] if self.feature_names is not None else f"feature_{feat_idx}"
             tuples.append((feat_name, thres))
         return tuples
+    
+    def evaluate_instance(self, x):
+        # Calculates the forest valuation for each instance x.
+        # for each (feature_i, threshold_t) on the mapping:
+        #     - if x[i] <= t, adds d[key]
+        #     - else, adds -d[key]
+        # Returns the valuation list.
+        result = []
+        for (feat_idx, thres), key_val in self.mapping.items():
+            feat_value = x.iloc[feat_idx] if hasattr(x, "iloc") else x[feat_idx]
+            if feat_value <= thres:
+                result.append(key_val)
+            else:
+                result.append(-key_val)
+        return result
 
     def __len__(self):
         return len(self.mapping)
