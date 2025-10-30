@@ -1,7 +1,4 @@
-import os
 import copy
-import random
-from pyexpat import features
 
 import numpy as np
 import pandas as pd
@@ -9,16 +6,19 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.tree import DecisionTreeClassifier, plot_tree
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import KFold
-from src.wrapper import *
+
+from src.wrappers import DecisionTreeWrapper, RandomForestWrapper
 
 MAX_RANDOM_FOREST_DEPTH = 8
 
-sign = lambda x,predicate: x if predicate else -x
+sign = lambda x, predicate: x if predicate else -x
+
 
 def get_x_y(dataset):
-    X = dataset.iloc[:, :-1] # everything except last column
-    y = dataset.iloc[:, -1] # last column
+    X = dataset.iloc[:, :-1]  # everything except last column
+    y = dataset.iloc[:, -1]  # last column
     return X, y
+
 
 def tree_explain_instance(t_clf, x):
     tree = t_clf.tree_
@@ -32,12 +32,13 @@ def tree_explain_instance(t_clf, x):
         feat_idx = features[node]
         feat_value = x.iloc[feat_idx]
         thres = thresholds[node]
-        explanation.append(sign(node+1, feat_value <= thres))
+        explanation.append(sign(node + 1, feat_value <= thres))
         node = tree.children_left[node] if feat_value <= thres else tree.children_right[node]
     explanation.append(node)
 
     pred = t_clf.classes_[np.argmax(tree.value[node])]
     return np.array(explanation[:-1]), pred
+
 
 def forest_explain_instance(f_clf, x):
     estimators = f_clf.estimators_
@@ -45,7 +46,7 @@ def forest_explain_instance(f_clf, x):
     predictions = []
     classes = estimators[0].classes_
 
-    add_count = lambda x: x+node_count if x >= 0 else x-node_count
+    add_count = lambda x: x + node_count if x >= 0 else x - node_count
 
     node_count = 0
 
@@ -90,7 +91,7 @@ def rf_cross_validation(data, n_trees, cv, n_forests=None):
         acc = accuracy_score(y_test, y_predict) * 100
         scores.append(acc)
         forests.append((copy.deepcopy(rf), train_idx, test_idx, acc))
-    avg_score = np.mean(scores) # calc avg
+    avg_score = np.mean(scores)  # calc avg
     return avg_score, forests
 
 
@@ -141,7 +142,7 @@ def main():
 
     print("values: ")
     print([int(np.argmax(tree.value[i])) if tree.feature[i] == -2 else None for i in range(len(tree.feature))])
-    print([bool(np.argmax(tree.value[i])) if tree.feature[i] == -2 else None for i in range(len(tree.feature)) ])
+    print([bool(np.argmax(tree.value[i])) if tree.feature[i] == -2 else None for i in range(len(tree.feature))])
     print()
 
     print("################################")
@@ -191,18 +192,16 @@ def main():
     suff_reason = wrapped_forest.find_sufficient_reason(instance)
     print(np.array(suff_reason), len(suff_reason))
 
-    print("###############################")
-    test_count = 0
-    for forest in forests:
-        test_wrapped_forest = RandomForestWrapper(forest[0])
-        f_test_X, f_test_y = get_x_y(dataset.iloc[forest[2]])
-        test_count += 1
-        print(f"\nWork on forest {test_count}")
-        for i in range(len(f_test_X)):
-            test_suff_reason = test_wrapped_forest.find_sufficient_reason(f_test_X.iloc[i])
-            print(np.array(test_suff_reason), len(test_suff_reason))
-
-
+    # print("###############################")
+    # test_count = 0
+    # for forest in forests:
+    #     test_wrapped_forest = RandomForestWrapper(forest[0])
+    #     f_test_X, f_test_y = get_x_y(dataset.iloc[forest[2]])
+    #     test_count += 1
+    #     print(f"\nWork on forest {test_count}")
+    #     for i in range(len(f_test_X)):
+    #         test_suff_reason = test_wrapped_forest.find_sufficient_reason(f_test_X.iloc[i])
+    #         print(np.array(test_suff_reason), len(test_suff_reason))
 
     # forest_map = ForestFeatureThresholdMap(first_forest, feature_names=X.columns)
     # print(forest_map.get_mapping())
@@ -215,6 +214,6 @@ def main():
     # print("\nValoração da floresta para a instância:")
     # print(valuation)
 
+
 if __name__ == "__main__":
     main()
-
