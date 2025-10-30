@@ -1,5 +1,8 @@
 import numpy as np
 from pandas import Series
+from pysat.card import CardEnc
+from pysat.formula import IDPool, CNF
+from pysat.solvers import Solver
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.tree import DecisionTreeClassifier
 
@@ -41,22 +44,24 @@ class DecisionTreeWrapper:
         self.root = nodes[0]
         for i in range(len(nodes)):
             if self.tree.children_left[i] == self.tree.children_right[i]: continue  # is a leaf
-            nodes[i].left = nodes[self.tree.children_left[i]]
-            nodes[i].right = nodes[self.tree.children_right[i]]
+            nodes[i].right = nodes[self.tree.children_left[i]]
+            nodes[i].left = nodes[self.tree.children_right[i]]
 
-    def binarize_instance(self, instance, hash_bin = None, invert = False):
+    def binarize_instance(self, instance, hash_bin=None, reversed=False, invert_condition= False):
         if not hash_bin:
             hash_bin = self.binarization
 
         output = []
+
         for feat, thres in self.binarization.keys():
-            if instance.iloc[feat] <= thres:
+            p =  instance.iloc[feat] <= thres
+            p = (not p) if invert_condition else p
+            if p:
                 output.append(hash_bin[(feat, thres)])
             else:
                 output.append(-hash_bin[(feat, thres)])
-        output.sort(key=abs, reverse=invert)
+        output.sort(key=abs, reverse=reversed)
         return np.array(output)
-
 
     def take_decision(self, instance) -> bool:
         node = self.root
@@ -123,6 +128,7 @@ class RandomForestWrapper:
     def __init__(self, clf: RandomForestClassifier):
         self.forest = clf
         self.binarization = {}
+        self.n_bin_features = 0
         self.trees: list[DecisionTreeWrapper] = []
         self.n_trees = 0
         self._wrap_forest()
@@ -137,19 +143,19 @@ class RandomForestWrapper:
                     count += 1
                     self.binarization[feat_thres] = count
         self.n_trees = len(self.trees)
+        self.n_bin_features = len(self.binarization)
 
-    def binarize_instance(self, instance, hash_bin = None, invert = False):
+    def binarize_instance(self, instance, hash_bin=None, reverse=False, invert_condition=False):
         if not hash_bin:
             hash_bin = self.binarization
 
         output = []
         for tree in self.trees:
-            output.extend(list(tree.binarize_instance(instance, hash_bin=hash_bin)))
+            output.extend(list(tree.binarize_instance(instance, hash_bin=hash_bin, invert_condition=invert_condition)))
 
         output = list(set(output))
-        output.sort(key=abs, reverse=invert)
+        output.sort(key=abs, reverse=reverse)
         return np.array(output)
-
 
     def find_direct_reason(self, instance: Series):
         explanations = []
@@ -175,8 +181,51 @@ class RandomForestWrapper:
         # return np.array(forest_direct_reason)
         return np.array(sorted(forest_direct_reason, key=abs)), bool(forest_class)
 
-    def find_sufficient_reason(self, instance):
-        pass
+    def calc_cnf_h(self) -> CNF:
+        # count = 1000
+        vpool = IDPool(occupied=[[0, (((self.n_bin_features // 100) + 1) * 100)]])
+
+        # create fresh variables y1,...,ym
+        y_vars = [vpool.id(f'y{i}') for i in range(self.n_trees)]
+
+        cnf_implicant = []
+        for yi, Ti in zip(y_vars, self.trees):
+            tree_cnf = Ti.to_cnf(hash_bin=self.binarization, negate_tree=True)
+            for clause in tree_cnf:
+                cnf_implicant.append([-yi] + clause)
+
+        k = (self.n_trees // 2) + 1
+        card_cnf = CardEnc.atleast(lits=y_vars, bound=k, vpool=vpool)
+        combined_cnf = CNF()
+        combined_cnf.extend(cnf_implicant)
+        combined_cnf.extend(card_cnf.clauses)
+        return combined_cnf
+
+    def is_sufficient_reason(self, candidate, h: CNF):
+        term_clause = [[l] for l in candidate]
+        combined = CNF()
+        combined.extend(h.clauses)
+        combined.extend(term_clause)
+
+        with Solver(bootstrap_with=combined.clauses) as solver:
+            return not solver.solve()
+
+    def find_sufficient_reason(self, instance, binarized_instance=False):
+        if not binarized_instance:
+            implicant = list(self.binarize_instance(instance, reverse=True)) # invert true and false direction to go
+        else:
+            implicant = list(instance)
+        implicant = [int(item) for item in implicant]
+        h_cnf = self.calc_cnf_h()
+        i = 0
+        while i < len(implicant):
+            candidate = implicant.copy()
+            candidate.pop(i)
+            if self.is_sufficient_reason(candidate, h_cnf):
+                implicant = candidate
+            else:
+                i += 1
+        return sorted(implicant, key=abs)
 
     def __len__(self):
         return sum([len(tree) for tree in self.trees])

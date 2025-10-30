@@ -1,5 +1,7 @@
 import os
 import copy
+import random
+from pyexpat import features
 
 import numpy as np
 import pandas as pd
@@ -181,7 +183,26 @@ def main():
     print("\nTree CNF Encoding: ")
     print(first_tree_map.to_cnf(negate_tree=True))
 
-    print(len(wrapped_forest.binarization))
+    # print(len(wrapped_forest.binarization))
+
+    # wrapped_forest.calc_cnf_h()
+
+    print("\nRandom Forest Sufficient Reason")
+    suff_reason = wrapped_forest.find_sufficient_reason(instance)
+    print(np.array(suff_reason), len(suff_reason))
+
+    print("###############################")
+    test_count = 0
+    for forest in forests:
+        test_wrapped_forest = RandomForestWrapper(forest[0])
+        f_test_X, f_test_y = get_x_y(dataset.iloc[forest[2]])
+        test_count += 1
+        print(f"\nWork on forest {test_count}")
+        for i in range(len(f_test_X)):
+            test_suff_reason = test_wrapped_forest.find_sufficient_reason(f_test_X.iloc[i])
+            print(np.array(test_suff_reason), len(test_suff_reason))
+
+
 
     # forest_map = ForestFeatureThresholdMap(first_forest, feature_names=X.columns)
     # print(forest_map.get_mapping())
