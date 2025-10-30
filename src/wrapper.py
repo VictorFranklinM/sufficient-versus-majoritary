@@ -44,6 +44,20 @@ class DecisionTreeWrapper:
             nodes[i].left = nodes[self.tree.children_left[i]]
             nodes[i].right = nodes[self.tree.children_right[i]]
 
+    def binarize_instance(self, instance, hash_bin = None, invert = False):
+        if not hash_bin:
+            hash_bin = self.binarization
+
+        output = []
+        for feat, thres in self.binarization.keys():
+            if instance.iloc[feat] <= thres:
+                output.append(hash_bin[(feat, thres)])
+            else:
+                output.append(-hash_bin[(feat, thres)])
+        output.sort(key=abs, reverse=invert)
+        return np.array(output)
+
+
     def take_decision(self, instance) -> bool:
         node = self.root
         while node.var:
@@ -70,6 +84,37 @@ class DecisionTreeWrapper:
         pred = node.value
         return np.array(explanation), pred
 
+    def to_cnf(self, hash_bin=None, negate_tree=False):
+        if hash_bin is None:
+            hash_bin = self.binarization
+        return [sorted(clause) for clause in self._to_cnf(self.root, hash_bin, negate_tree)]
+
+    def _to_cnf(self, node: DecisionNodeWrapper, hash_bin: dict[tuple[np.int64, np.float64], int], negate_tree: bool):
+        # Base case: leaf node
+        if node is None: raise ValueError("Provide a root")
+        if node.value is not None:
+            if node.value is not None:
+                if negate_tree:
+                    # Swap True/False for negation
+                    return [] if not node.value else [[]]
+                else:
+                    return [] if node.value else [[]]
+
+        # Recursive case: internal decision node
+        left_cnf = self._to_cnf(node.left, hash_bin, negate_tree)
+        right_cnf = self._to_cnf(node.right, hash_bin, negate_tree)
+
+        # Combine using Shannon expansion:
+        # CNF = (¬var ∨ clauses from left) ∧ (var ∨ clauses from right)
+        cnf = []
+
+        for clause in left_cnf:
+            cnf.append(clause + [hash_bin[node.var]])  # if left was False, var=True fixes it
+        for clause in right_cnf:
+            cnf.append(clause + [-hash_bin[node.var]])  # if right was False, var=False fixes it
+
+        return cnf
+
     def __len__(self):
         return self.n_nodes
 
@@ -92,6 +137,19 @@ class RandomForestWrapper:
                     count += 1
                     self.binarization[feat_thres] = count
         self.n_trees = len(self.trees)
+
+    def binarize_instance(self, instance, hash_bin = None, invert = False):
+        if not hash_bin:
+            hash_bin = self.binarization
+
+        output = []
+        for tree in self.trees:
+            output.extend(list(tree.binarize_instance(instance, hash_bin=hash_bin)))
+
+        output = list(set(output))
+        output.sort(key=abs, reverse=invert)
+        return np.array(output)
+
 
     def find_direct_reason(self, instance: Series):
         explanations = []

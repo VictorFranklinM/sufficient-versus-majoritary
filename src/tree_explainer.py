@@ -175,11 +175,11 @@ def main():
     print("\nForest Direct Reason: ")
     wrapped_forest = RandomForestWrapper(first_forest)
     f_expl, f_pred = wrapped_forest.find_direct_reason(instance)
-    print(f_expl, f_pred)
+    print(f_expl, f_pred, len(f_expl))
+    print(wrapped_forest.binarize_instance(instance))
 
     print("\nTree CNF Encoding: ")
-
-    # print(first_tree_map.to_cnf(negate_tree=True))
+    print(first_tree_map.to_cnf(negate_tree=True))
 
     print(len(wrapped_forest.binarization))
 
