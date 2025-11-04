@@ -40,7 +40,7 @@ class RandomForestWrapper:
         output.sort(key=abs, reverse=reverse)
         return np.array(output)
 
-    def find_direct_reason(self, instance: Series):
+    def find_direct_reason(self, instance: Series, z3=False):
         explanations = []
         predictions = []
 
@@ -53,18 +53,20 @@ class RandomForestWrapper:
         forest_class = max(np.array([True, False]), key=lambda c: sum(predictions == c))
 
         forest_direct_reason = []
+        vote_count = 0
 
         for i in range(len(explanations)):
             if predictions[i] == forest_class:
                 # print(i, np.array(explanations[i]))
                 forest_direct_reason += explanations[i]
+                vote_count += 1
 
         forest_direct_reason = list(set(forest_direct_reason))
 
         # return np.array(forest_direct_reason)
-        return np.array(sorted(forest_direct_reason, key=abs)), bool(forest_class)
+        return np.array(sorted(forest_direct_reason, key=abs)), bool(forest_class), vote_count
 
-    def calc_cnf_h(self) -> CNF:
+    def calc_cnf_h(self, instance) -> CNF:
         # count = 1000
         vpool = IDPool(occupied=[[0, (((self.n_bin_features // 100) + 1) * 100)]])
 
@@ -74,8 +76,10 @@ class RandomForestWrapper:
         cnf_implicant = []
         for yi, Ti in zip(y_vars, self.trees):
             tree_cnf = Ti.to_cnf(hash_bin=self.binarization, negate_tree=True)
+            decision = Ti.take_decision(instance)
             for clause in tree_cnf:
-                cnf_implicant.append([-yi] + clause)
+                # cnf_implicant.append([-yi] + clause)
+                cnf_implicant.append([yi if decision else -yi] + clause)
 
         k = (self.n_trees // 2) + 1
         card_cnf = CardEnc.atleast(lits=y_vars, bound=k, vpool=vpool)
@@ -89,6 +93,7 @@ class RandomForestWrapper:
         combined = CNF()
         combined.extend(h.clauses)
         combined.extend(term_clause)
+        # combined.extend([-target])
 
         with Solver(bootstrap_with=combined.clauses) as solver:
             return not solver.solve()
@@ -99,7 +104,7 @@ class RandomForestWrapper:
         else:
             implicant = list(instance)
         implicant = [int(item) for item in implicant]
-        h_cnf = self.calc_cnf_h()
+        h_cnf = self.calc_cnf_h(instance)
         i = 0
         while i < len(implicant):
             candidate = implicant.copy()
@@ -108,7 +113,7 @@ class RandomForestWrapper:
                 implicant = candidate
             else:
                 i += 1
-        return sorted(implicant, key=abs)
+        return np.array(sorted(implicant, key=abs))
 
     def __len__(self):
         return sum([len(tree) for tree in self.trees])

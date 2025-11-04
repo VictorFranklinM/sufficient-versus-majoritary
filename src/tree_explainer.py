@@ -150,9 +150,10 @@ def main():
 
     X, y = get_x_y(dataset)
     instance = X.iloc[0]
+    clazz = y.iloc[0]
     print("Instance: ")
-    print(X.iloc[0])
-    print(y.iloc[0])
+    print(instance)
+    print(clazz)
     print()
 
     print("Tree Explain instance: ")
@@ -170,19 +171,33 @@ def main():
     print("\nTree Direct Reason:")
     for t_clf in first_forest.estimators_:
         wrapper = DecisionTreeWrapper(t_clf)
-        t_expl, t_pred = wrapper.find_direct_reason(instance)
+        t_expl, t_pred = wrapper.find_direct_reason(instance, z3=True)
         # pred = float(pred)
+        print(type(t_expl[0]))
         print(t_expl, t_pred)
     # print(first_tree_map.get_direct_reason(X.iloc[0]))
 
+    print("\nDecision Tree Sufficient Reason")
+    for t_clf in first_forest.estimators_:
+        wrapper = DecisionTreeWrapper(t_clf)
+        t_expl = wrapper.find_sufficient_reason(instance, int(clazz))
+        t_expl_z3 = wrapper.find_sufficient_reason(instance, int(clazz), z3=True)
+        # pred = float(pred)
+        print(t_expl)
+        print(t_expl_z3)
+
+    # suff_reason = wrapped_forest.find_sufficient_reason(instance, clazz)
+    # print(np.array(suff_reason), len(suff_reason))
+
     print("\nForest Direct Reason: ")
     wrapped_forest = RandomForestWrapper(first_forest)
-    f_expl, f_pred = wrapped_forest.find_direct_reason(instance)
-    print(f_expl, f_pred, len(f_expl))
-    print(wrapped_forest.binarize_instance(instance))
+    f_expl, f_pred, votes = wrapped_forest.find_direct_reason(instance)
+    print(f_expl, f_pred, votes, len(f_expl))
+    print(len(wrapped_forest.binarize_instance(instance)))
 
     print("\nTree CNF Encoding: ")
     print(first_tree_map.to_cnf(negate_tree=True))
+    print(first_tree_map.to_z3_formula())
 
     # print(len(wrapped_forest.binarization))
 
