@@ -75,9 +75,7 @@ class MinimumMajoritaryExplainer:
             explanation = []
             for idx in features:
                 saved_value = candidate[idx]
-                if candidate[idx] == 0: candidate[idx] = 1
-                if candidate[idx] == 1: candidate[idx] = 0
-                candidate[idx] = 0
+                candidate[idx] = 1 - candidate[idx]
                 new_class = self._predict_majority(candidate)
                 if new_class != original_class:
                     candidate[idx] = saved_value
@@ -136,7 +134,7 @@ def main():
     print("Predições individuais das árvores:")
     preds = []
     for t_clf in first_forest.estimators_:
-        expl, pred = tree_explain_instance(t_clf, X.iloc[0])
+        expl, pred = tree_explain_instance(t_clf, X_bin.iloc[0])
         print(expl)
         preds.append(pred)
     print(preds)
