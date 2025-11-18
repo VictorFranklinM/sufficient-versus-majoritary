@@ -30,7 +30,7 @@ def rf_cross_validation(data, n_trees, cv, n_forests=None):
 
 
 def main():
-    fichiers = os.listdir('../datasets')
+    fichiers = os.listdir('datasets')
     if not fichiers:
         raise FileNotFoundError("Datasets not found! Extract datasets.zip into /datasets/")
     database = {}
@@ -39,7 +39,9 @@ def main():
                         "mnist38": 85, "dexter": 101, "recidivism": 25, "higgs-boson": 95, "placement": 25}
 
     for f in fichiers:
-        database[f.split('.')[0]] = pd.read_csv(f"../datasets/{f}")
+        if f != "placement.csv":
+            continue
+        database[f.split('.')[0]] = pd.read_csv(f"datasets/{f}")
 
     for dataset in database.keys():
         if dataset not in tree_amount_info.keys(): continue
