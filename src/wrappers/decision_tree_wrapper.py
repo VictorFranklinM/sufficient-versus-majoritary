@@ -15,6 +15,9 @@ class DecisionNodeWrapper:
         self.right = right
         self.value = value
 
+    def __repr__(self):
+        return f"{self.var} | [[{self.left} , {self.right}]] | {self.value}"
+
 
 class DecisionTreeWrapper:
     def __init__(self, clf: DecisionTreeClassifier):
@@ -40,7 +43,7 @@ class DecisionTreeWrapper:
                     self.binarization[feat_thres] = count
                 node = DecisionNodeWrapper(feat_thres)
             nodes.append(node)
-
+        
         self.n_nodes = len(nodes)
         self.root = nodes[0]
         for i in range(len(nodes)):
@@ -98,7 +101,6 @@ class DecisionTreeWrapper:
             return constraints, [Bool("y") == pred]
 
 
-
     def is_sufficient_reason(self, candidate, h: CNF):
         term_clause = [[l] for l in candidate]
         combined = CNF()
@@ -131,7 +133,7 @@ class DecisionTreeWrapper:
 
             # atributos e valores da entrada: uma equação para cada variável
             atributos = [
-                var == RealVal(x.iloc[nome])  for nome, var in z3_vars.items()
+                var == RealVal(x.iloc[nome]) for nome, var in z3_vars.items()
             ]
             # print(atributos)
 
@@ -159,8 +161,6 @@ class DecisionTreeWrapper:
             return explicacao
 
 
-
-
         # Sort literals by absolute value (optional, for deterministic removal)
         implicant.sort(key=abs, reverse=True)
         implicant = [int(x) for x in implicant]
@@ -184,7 +184,7 @@ class DecisionTreeWrapper:
         # Step 4: Return minimized sufficient reason
         return np.array(sorted(implicant, key=abs))
 
-    def to_z3_formula(self, binarized=True):
+    def to_z3_formula(self, binarized=False):
         if binarized:
             # Cria variáveis Z3 para cada feature binarizada
             z3_vars = {key: Bool(f"x_{abs(value)}") for key, value in self.binarization.items()}

@@ -98,7 +98,7 @@ def rf_cross_validation(data, n_trees, cv, n_forests=None):
 def main():
     # Use placement or compas for testing purposes
     fichier = "placement"
-    dataset = pd.read_csv(f"../datasets/{fichier}.csv")
+    dataset = pd.read_csv(f"datasets/{fichier}.csv")
     print("Dataset: ")
     print(dataset)
     print()
@@ -108,7 +108,7 @@ def main():
     print()
     first_forest: RandomForestClassifier = forests[0][0]
     first_train, first_test = forests[0][1], forests[0][2]
-    first_clf: DecisionTreeClassifier = first_forest.estimators_[0]
+    first_clf: DecisionTreeClassifier = first_forest.estimators_[1]
     tree = first_clf.tree_
 
     print("################################")
@@ -173,18 +173,18 @@ def main():
         wrapper = DecisionTreeWrapper(t_clf)
         t_expl, t_pred = wrapper.find_direct_reason(instance, z3=True)
         # pred = float(pred)
-        print(type(t_expl[0]))
         print(t_expl, t_pred)
     # print(first_tree_map.get_direct_reason(X.iloc[0]))
 
     print("\nDecision Tree Sufficient Reason")
     for t_clf in first_forest.estimators_:
         wrapper = DecisionTreeWrapper(t_clf)
-        t_expl = wrapper.find_sufficient_reason(instance, int(clazz))
-        t_expl_z3 = wrapper.find_sufficient_reason(instance, int(clazz), z3=True)
+        t_expl = wrapper.find_sufficient_reason(instance, int(wrapper.take_decision(instance)))
+        t_expl_z3 = wrapper.find_sufficient_reason(instance, int(wrapper.take_decision(instance)), z3=True)
         # pred = float(pred)
-        print(t_expl)
+        # print(t_expl)
         print(t_expl_z3)
+        print()
 
     # suff_reason = wrapped_forest.find_sufficient_reason(instance, clazz)
     # print(np.array(suff_reason), len(suff_reason))
@@ -199,13 +199,13 @@ def main():
     print(first_tree_map.to_cnf(negate_tree=True))
     print(first_tree_map.to_z3_formula())
 
-    # print(len(wrapped_forest.binarization))
+    # # print(len(wrapped_forest.binarization))
 
-    # wrapped_forest.calc_cnf_h()
+    # # wrapped_forest.calc_cnf_h()
 
-    print("\nRandom Forest Sufficient Reason")
-    suff_reason = wrapped_forest.find_sufficient_reason(instance)
-    print(np.array(suff_reason), len(suff_reason))
+    # print("\nRandom Forest Sufficient Reason")
+    # suff_reason = wrapped_forest.find_sufficient_reason(instance)
+    # print(np.array(suff_reason), len(suff_reason))
 
     # print("###############################")
     # test_count = 0

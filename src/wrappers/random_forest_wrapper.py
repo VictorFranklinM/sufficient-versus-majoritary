@@ -78,8 +78,8 @@ class RandomForestWrapper:
             tree_cnf = Ti.to_cnf(hash_bin=self.binarization, negate_tree=True)
             decision = Ti.take_decision(instance)
             for clause in tree_cnf:
-                # cnf_implicant.append([-yi] + clause)
-                cnf_implicant.append([yi if decision else -yi] + clause)
+                cnf_implicant.append([-yi] + clause)
+                # cnf_implicant.append([yi if decision else -yi] + clause)
 
         k = (self.n_trees // 2) + 1
         card_cnf = CardEnc.atleast(lits=y_vars, bound=k, vpool=vpool)
