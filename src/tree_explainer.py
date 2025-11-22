@@ -97,8 +97,8 @@ def rf_cross_validation(data, n_trees, cv, n_forests=None):
 
 def main():
     # Use placement or compas for testing purposes
-    fichier = "placement"
-    dataset = pd.read_csv(f"../datasets/{fichier}.csv")
+    fichier = "bank"
+    dataset = pd.read_csv(f"datasets/{fichier}.csv")
     print("Dataset: ")
     print(dataset)
     print()
@@ -191,6 +191,10 @@ def main():
     print("\nRandom Forest Sufficient Reason")
     suff_reason = wrapped_forest.find_sufficient_reason(instance)
     print(np.array(suff_reason), len(suff_reason))
+
+    print("\nRandom Forest Majoritary Reason")
+    majo_reason = wrapped_forest.find_majoritary_reason(instance)
+    print(np.array(majo_reason), len(majo_reason))
 
     # print("###############################")
     # test_count = 0

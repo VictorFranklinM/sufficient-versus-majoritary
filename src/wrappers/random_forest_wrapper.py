@@ -5,7 +5,8 @@ from pysat.formula import CNF, IDPool
 from pysat.solvers import Solver
 from sklearn.ensemble import RandomForestClassifier
 
-from src.wrappers import DecisionTreeWrapper
+from .decision_tree_wrapper import DecisionTreeWrapper
+
 
 class RandomForestWrapper:
     def __init__(self, clf: RandomForestClassifier):
@@ -109,6 +110,40 @@ class RandomForestWrapper:
             else:
                 i += 1
         return sorted(implicant, key=abs)
+    
+    def is_majoritary_reason(self, candidate, h: CNF):
+        term_clause = [[l] for l in candidate]
+        combined = CNF()
+        combined.extend(h.clauses)
+        combined.extend(term_clause)
+
+        with Solver(bootstrap_with=combined.clauses) as solver:
+            return not solver.solve()
+
+    def find_majoritary_reason(self, instance, binarized_instance=False):
+        if not binarized_instance:
+            implicant = list(self.binarize_instance(instance, reverse=True))
+        else:
+            implicant = list(instance)
+        implicant = [int(item) for item in implicant]
+        h_cnf = self.calc_cnf_h()
+        i = 0
+        majoritary = []
+        candidate = implicant.copy()
+        print("candidate")
+        print(candidate)
+        while i < len(implicant):
+            candidate = implicant.copy()
+            #candidate[i] = -candidate[i]
+            if self.is_majoritary_reason(candidate, h_cnf):
+                majoritary.append(candidate[i])
+            i += 1
+        return sorted(majoritary, key=abs)
+
+
+
+
+
 
     def __len__(self):
         return sum([len(tree) for tree in self.trees])
