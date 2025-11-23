@@ -113,77 +113,207 @@ class DecisionTreeWrapper:
 
     def find_sufficient_reason(self, instance: Series, target, hash_bin=None, binarized_instance=False, z3=False):
         """
-        Find a minimal subset of features (sufficient reason) that guarantees
-        the tree predicts True for the given instance.
+        Retorna sempre uma string no formato pedido, ex: "[64 == f_11, 19 == f_12]".
+        No modo z3: executa a ablação apenas sobre os atributos do caminho da instância.
+        No modo não-z3: usa o fluxo CNF/guloso e mapeia o resultado para o mesmo formato.
         """
+
+        def _fmt_pairs_as_z3(pairs):
+            if not pairs:
+                return "[]"
+            items = []
+            for feat_idx, val in pairs:
+                try:
+                    fval = float(val)
+                    if float(fval).is_integer():
+                        sval = str(int(fval))
+                    else:
+                        sval = str(fval)
+                except Exception:
+                    sval = str(val)
+                items.append(f"{sval} == f_{int(feat_idx)}")
+            return "[" + ", ".join(items) + "]"
+
         if hash_bin is None:
             hash_bin = self.binarization
 
-        # Step 1: Get the full implicant (binarized literals)
+        # passo inicial: implicant binarizado (usado no fallback / modo não-z3)
         if not binarized_instance:
             implicant = list(self.binarize_instance(instance, hash_bin=hash_bin))
         else:
             implicant = list(instance)
 
+        # reverse map hash_bin id -> (feat_idx, threshold)
+        rev_hash = {v: k for k, v in hash_bin.items()}
+
+        # função auxiliar: percorre a árvore com a instância e retorna a lista de features do caminho
+        def _path_features_from_instance(x_instance):
+            node = self.root
+            path_feats = []
+            while node and node.var:
+                feat_idx, th = node.var
+                path_feats.append(int(feat_idx))
+                # seguir ramificação conforme a instância
+                try:
+                    val = x_instance.iloc[feat_idx]
+                except Exception:
+                    val = x_instance.loc[feat_idx]
+                if val <= th:
+                    node = node.left
+                else:
+                    node = node.right
+            return path_feats
+
+        # -----------------------
+        # MODO Z3: trabalhar apenas com features do caminho
+        # -----------------------
         if z3:
+            from z3 import Z3_REAL_SORT, Z3_BOOL_SORT
+
             z3_vars, y, formula = self.to_z3_formula(binarized=False)
-            x, classe_alvo = instance, target
+            x = instance
 
             solver = Z3Solver()
             solver.add(formula)
 
-            # atributos e valores da entrada: uma equação para cada variável
-            atributos = [
-                var == RealVal(x.iloc[nome]) for nome, var in z3_vars.items()
-            ]
-            # print(atributos)
+            # extrair apenas features do caminho (pode haver repetições; usamos set)
+            path_feat_list = _path_features_from_instance(x)
+            path_feats = sorted(set(path_feat_list))  # vantagens: único por índice
 
-            explicacao = atributos.copy()
+            # 1) construir atributo_constraints somente para essas features do caminho
+            atributo_constraints = {}
+            for feat_idx in path_feats:
+                var = z3_vars[feat_idx]
+                try:
+                    val = float(x.iloc[feat_idx])
+                except Exception:
+                    val = float(x.loc[feat_idx])
 
-            for atributo in atributos:
-                # Testa se é possível garantir y == classe_alvo com os outros atributos
-                # print(atributos)
-                outras_features = [h2 for h2 in atributos if not h2.eq(atributo)]
-                # print(outras_features)
+                if var.sort().kind() == Z3_REAL_SORT:
+                    atributo_constraints[int(feat_idx)] = (var == RealVal(val))
+                else:
+                    atributo_constraints[int(feat_idx)] = (var == BoolVal(bool(val)))
+
+            # 2) bounds razoáveis a partir dos thresholds conhecidos (apenas para manter segurança)
+            thresholds_by_feat = defaultdict(list)
+            for (feat, th) in hash_bin.keys():
+                thresholds_by_feat[int(feat)].append(float(th))
+
+            feature_bounds = {}
+            for feat_idx in path_feats:
+                if feat_idx in thresholds_by_feat and len(thresholds_by_feat[feat_idx]) > 0:
+                    ths = sorted(thresholds_by_feat[feat_idx])
+                    feature_bounds[int(feat_idx)] = (ths[0] - 1.0, ths[-1] + 1.0)
+                else:
+                    try:
+                        base = float(x.iloc[feat_idx])
+                    except Exception:
+                        base = float(x.loc[feat_idx])
+                    feature_bounds[int(feat_idx)] = (base - 1.0, base + 1.0)
+
+            # 3) explicacao_constraints inicia com todas as features do caminho fixadas
+            explicacao_constraints = dict(atributo_constraints)
+
+            # 4) ablação: remover cada atributo do caminho e testar
+            for feat_idx in list(atributo_constraints.keys()):
+                outras = [c for f, c in atributo_constraints.items() if f is not feat_idx]
+
                 solver.push()
-                solver.add(And(outras_features))
-                solver.add(y != classe_alvo)  # queremos refutar isso
-                resultado = solver.check()
+                if outras:
+                    solver.add(And(*outras))
+
+                # para a feature removida, adicionamos apenas bounds (se Real)
+                var = z3_vars[feat_idx]
+                if var.sort().kind() == Z3_REAL_SORT:
+                    lb, ub = feature_bounds[feat_idx]
+                    solver.add(var >= RealVal(lb))
+                    solver.add(var <= RealVal(ub))
+
+                # adicionar y != target e checar
+                if y.sort().kind() == Z3_REAL_SORT:
+                    solver.add(y != RealVal(float(target)))
+                elif y.sort().kind() == Z3_BOOL_SORT:
+                    solver.add(y != BoolVal(bool(target)))
+                else:
+                    solver.add(y != RealVal(float(target)))
+
+                res = solver.check()
                 solver.pop()
 
-                if resultado == unsat:
-                    # print('entrou')
-                    # é garantido ser igual a classe alvo mesmo sem o atributo, logo ele cai fora
-                    explicacao.remove(atributo)
-                    # explicacao.append(atributo)
-                # else Pode dar outra classe sem o atributo. Logo, o atributo é necessário dadas as outras features
-                # ou seja, mantemos ele em
+                if res == unsat:
+                    explicacao_constraints.pop(feat_idx, None)
+                else:
+                    pass
 
-            return explicacao
+            # 5) converte explicacao_constraints -> lista (feat_idx, valor_inst)
+            explicacao_legivel = []
+            for feat_idx in sorted(explicacao_constraints.keys()):
+                try:
+                    val = float(instance.iloc[feat_idx])
+                except Exception:
+                    val = float(instance.loc[feat_idx])
+                explicacao_legivel.append((int(feat_idx), val))
 
+            # 6) fallback CNF/guloso caso fique vazia (mapeando apenas literais do caminho)
+            if len(explicacao_legivel) == 0:
+                # usar o implicant binarizado original (ele contém literais do caminho)
+                implicant.sort(key=abs, reverse=True)
+                implicant = [int(x) for x in implicant]
+                tree_cnf = CNF(
+                    from_clauses=self.to_cnf(hash_bin=hash_bin, negate_tree=not self.take_decision(instance)))
 
-        # Sort literals by absolute value (optional, for deterministic removal)
+                i = 0
+                while i < len(implicant):
+                    candidate = implicant.copy()
+                    candidate.pop(i)
+                    if self.is_sufficient_reason(candidate, tree_cnf):
+                        implicant = candidate
+                    else:
+                        i += 1
+
+                resultado = []
+                for lit in implicant:
+                    lit_abs = abs(int(lit))
+                    if lit_abs in rev_hash:
+                        feat_idx, _ = rev_hash[lit_abs]
+                        try:
+                            val = float(instance.iloc[int(feat_idx)])
+                        except Exception:
+                            val = float(instance.loc[int(feat_idx)])
+                        resultado.append((int(feat_idx), val))
+                return _fmt_pairs_as_z3(resultado)
+
+            return _fmt_pairs_as_z3(explicacao_legivel)
+
+        # -----------------------
+        # MODO NÃO-Z3: usa CNF/guloso mas retorna no mesmo formato pedido
+        # -----------------------
         implicant.sort(key=abs, reverse=True)
         implicant = [int(x) for x in implicant]
 
-        # Step 2: Build CNF from tree
         tree_cnf = CNF(from_clauses=self.to_cnf(hash_bin=hash_bin, negate_tree=not self.take_decision(instance)))
 
-        # Step 3: Greedy removal of literals
         i = 0
         while i < len(implicant):
             candidate = implicant.copy()
-            candidate.pop(i)  # try removing this literal
-
+            candidate.pop(i)
             if self.is_sufficient_reason(candidate, tree_cnf):
-                # Removal is safe → keep literal removed
                 implicant = candidate
             else:
-                # Removal breaks sufficiency → keep literal
                 i += 1
 
-        # Step 4: Return minimized sufficient reason
-        return np.array(sorted(implicant, key=abs))
+        resultado = []
+        for lit in implicant:
+            lit_abs = abs(int(lit))
+            if lit_abs in rev_hash:
+                feat_idx, _ = rev_hash[lit_abs]
+                try:
+                    val = float(instance.iloc[int(feat_idx)])
+                except Exception:
+                    val = float(instance.loc[int(feat_idx)])
+                resultado.append((int(feat_idx), val))
+
+        return _fmt_pairs_as_z3(resultado)
 
     def to_z3_formula(self, binarized=False):
         # Caso binarizado
