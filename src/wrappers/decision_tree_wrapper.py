@@ -6,6 +6,7 @@ from sklearn.tree import DecisionTreeClassifier
 from z3 import Solver as Z3Solver, BoolRef
 from z3 import Real, Int, And, Or, Not, Implies, simplify, RealVal, IntVal, sat, unsat, BoolVal
 from z3 import Bools, Bool
+from collections import defaultdict
 
 
 class DecisionNodeWrapper:
@@ -185,66 +186,156 @@ class DecisionTreeWrapper:
         return np.array(sorted(implicant, key=abs))
 
     def to_z3_formula(self, binarized=False):
+        # Caso binarizado
         if binarized:
             # Cria variáveis Z3 para cada feature binarizada
             z3_vars = {key: Bool(f"x_{abs(value)}") for key, value in self.binarization.items()}
+            # variaveis bool criadas a partir dos thresholds
+            bool_vars = {}
             # classe_para_inteiro = {nome: i for i, nome in enumerate(clf.classes_)}
             paths = []
 
-            def construir_path(node: DecisionNodeWrapper=self.root, condicoes=[]):
+            # nome das variaveis booleanas no Z3
+            def var_name(feat_idx, thres, op):
+                return f"f{feat_idx} {op} {thres:.3f}"
+
+            def construir_path(node, condicoes=[]):
                 # Se é folha
                 if not node.var:
-                    # classe_index = values[node].argmax()
-                    classe_val = node.value
-                    paths.append((And(condicoes), node.value))
+                    # valor da classe já vem binarizado pelo wrapper
+                    classe = bool(node.value)
+                    paths.append((And(condicoes), classe))
                     return
 
-                thres = node.var[1]
-                var = z3_vars[node.var]
+                feat_idx, thres = node.var
+                left_name = var_name(feat_idx, thres, "<=")
+                right_name = var_name(feat_idx, thres, ">")
+
+                if left_name not in bool_vars:
+                    bool_vars[left_name] = Bool(left_name)
+                if right_name not in bool_vars:
+                    bool_vars[right_name] = Not(bool_vars[left_name])
 
                 # Ramificação à esquerda: x <= threshold
-                cond_esq = condicoes + [var == True]
+                cond_esq = condicoes + [bool_vars[left_name]]
                 construir_path(node.left, cond_esq)
 
                 # Ramificação à direita: x > threshold
-                cond_dir = condicoes + [var == False]
+                cond_dir = condicoes + [Not(bool_vars[left_name])]
                 construir_path(node.right, cond_dir)
 
-            construir_path()
+            construir_path(self.root)
 
             # Predição final como variável: y
             y = Bool("y")
-            formulas = [Implies(cond, y == BoolVal(classe)) for cond, classe in paths]
-            return z3_vars, y, And(*formulas)
+            formulas = []
 
-        # Cria variáveis Z3 para cada feature
+            # Coerência entre thresholds
+            thresholds_by_feat = defaultdict(list)
+
+            for var_name in bool_vars.keys():
+                if " <=" in var_name:
+                    feat_name, thres_str = var_name.split(" <=")
+                    thresholds_by_feat[feat_name].append(float(thres_str))
+
+            # constraints de monotonicidade
+            for feat, ths in thresholds_by_feat.items():
+                ths.sort()
+                for i in range(len(ths) - 1):
+                    v1 = bool_vars[f"{feat} <= {ths[i]:.3f}"]
+                    v2 = bool_vars[f"{feat} <= {ths[i + 1]:.3f}"]
+                    formulas.append(Implies(v1, v2))
+
+            # caminho -> classe (binarizado)
+            for cond, classe in paths:
+                formulas.append(Implies(cond, y == BoolVal(classe)))
+
+            # lista apenas dos caminhos
+            conds_only = [cond for cond, _ in paths]
+
+            # ao menos um caminho verdadeiro
+            formulas.append(Or(*conds_only))
+
+            # monocidade
+            for i in range(len(conds_only) - 1):
+                for j in range(i + 1, len(conds_only)):
+                    formulas.append(Not(And(conds_only[i], conds_only[j])))
+
+            return bool_vars, y, And(*formulas)
+
+        # Cria variáveis Z3 para cada feature (Caso não binarizado)
         z3_vars = {idx: Real(f"f_{idx}") for idx in range(self.tree.n_features)}
+        # variaveis bool criadas a partir dos thresholds
+        bool_vars = {}
         # classe_para_inteiro = {nome: i for i, nome in enumerate(clf.classes_)}
         paths = []
 
-        def construir_path(node: DecisionNodeWrapper = self.root, condicoes=[]):
+        def cond_name_real(feat_idx, thres, op):
+            return f"f{feat_idx} {op} {thres:.3f}"
+
+        def construir_path(node, condicoes=[]):
             # Se é folha
             if not node.var:
-                paths.append((And(condicoes), int(node.value)))
+                classe = int(node.value)
+                paths.append((And(condicoes), classe))
                 return
 
-            feat_idx = node.var[0]
-            thres = node.var[1]
+            feat_idx, thres = node.var
             var = z3_vars[feat_idx]
 
+            nome_esq = cond_name_real(feat_idx, thres, "<=")
+            nome_dir = cond_name_real(feat_idx, thres, ">")
+
+            if nome_esq not in bool_vars:
+                bool_vars[nome_esq] = Bool(nome_esq)
+            if nome_dir not in bool_vars:
+                bool_vars[nome_dir] = Not(bool_vars[nome_esq])
+
             # Ramificação à esquerda: x <= threshold
-            cond_esq = condicoes + [var <= thres]
+            cond_esq = condicoes + [var <= thres, bool_vars[nome_esq]]
             construir_path(node.left, cond_esq)
 
             # Ramificação à direita: x > threshold
-            cond_dir = condicoes + [var > thres]
+            cond_dir = condicoes + [var > thres, Not(bool_vars[nome_esq])]
             construir_path(node.right, cond_dir)
 
-        construir_path()
+        construir_path(self.root)
 
         # Predição final como variável: y
         y = Real("y")
-        formulas = [Implies(cond, y == RealVal(classe)) for cond, classe in paths]
+        formulas = []
+
+        # Coerência entre thresholds
+        thresholds_by_feat = defaultdict(list)
+
+        for var_name in bool_vars.keys():
+            if " <=" in var_name:
+                feat_name, thres_str = var_name.split(" <=")
+                thresholds_by_feat[feat_name].append(float(thres_str))
+
+        # constraints de monotonicidade
+        for feat, ths in thresholds_by_feat.items():
+            ths.sort()
+            for i in range(len(ths) - 1):
+                v1 = bool_vars[f"{feat} <= {ths[i]:.3f}"]
+                v2 = bool_vars[f"{feat} <= {ths[i + 1]:.3f}"]
+                formulas.append(Implies(v1, v2))
+
+        # caminho -> classe (nao binarizado)
+        for cond, classe in paths:
+            formulas.append(Implies(cond, y == RealVal(classe)))
+
+        # lista apenas dos caminhos
+        conds_only = [cond for cond, _ in paths]
+
+        # ao menos um caminho verdadeiro
+        formulas.append(Or(*conds_only))
+
+        # monocidade
+        for i in range(len(conds_only) - 1):
+            for j in range(i + 1, len(conds_only)):
+                formulas.append(Not(And(conds_only[i], conds_only[j])))
+
         return z3_vars, y, And(*formulas)
 
     def to_cnf(self, hash_bin=None, negate_tree=False):
