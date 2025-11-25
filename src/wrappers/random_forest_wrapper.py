@@ -129,15 +129,15 @@ class RandomForestWrapper:
         h_cnf = self.calc_cnf_h()
         i = 0
         majoritary = []
-        candidate = implicant.copy()
-        print("candidate")
-        print(candidate)
         while i < len(implicant):
             candidate = implicant.copy()
-            #candidate[i] = -candidate[i]
+            candidate[i] = -candidate[i]
             if self.is_majoritary_reason(candidate, h_cnf):
+                candidate[i] = -candidate[i]
+                i += 1
+            else:
                 majoritary.append(candidate[i])
-            i += 1
+                i += 1
         return sorted(majoritary, key=abs)
 
 
