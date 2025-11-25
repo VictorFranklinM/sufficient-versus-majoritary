@@ -3,9 +3,7 @@ from pandas import Series
 from pysat.formula import CNF
 from pysat.solvers import Solver as PySatSolver
 from sklearn.tree import DecisionTreeClassifier
-from z3 import Solver as Z3Solver, BoolRef
-from z3 import Real, Int, And, Or, Not, Implies, simplify, RealVal, IntVal, sat, unsat, BoolVal
-from z3 import Bools, Bool
+from z3 import Solver as Z3Solver, BoolRef, Real, Int, And, Or, Not, Implies, simplify, RealVal, IntVal, sat, unsat, BoolVal, Bools, Bool, Z3_REAL_SORT, Z3_BOOL_SORT
 from collections import defaultdict
 
 
@@ -168,7 +166,6 @@ class DecisionTreeWrapper:
         # MODO Z3: trabalhar apenas com features do caminho
         # -----------------------
         if z3:
-            from z3 import Z3_REAL_SORT, Z3_BOOL_SORT
 
             z3_vars, y, formula = self.to_z3_formula(binarized=False)
             x = instance
