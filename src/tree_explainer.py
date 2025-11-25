@@ -6,6 +6,10 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.tree import DecisionTreeClassifier, plot_tree
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import KFold
+from z3 import *
+from z3 import sat
+from z3 import Solver as Z3Solver
+from collections import defaultdict
 
 from src.wrappers import DecisionTreeWrapper, RandomForestWrapper
 
@@ -13,6 +17,352 @@ MAX_RANDOM_FOREST_DEPTH = 8
 
 sign = lambda x, predicate: x if predicate else -x
 
+def verify_sufficiency_random_perturbation(rf_clf, rf_wrapper, instance, explan_pairs, n_trials=1000, feature_bounds=None, rng=None):
+    """
+    Teste empírico: fixa os pares explan_pairs e sorteia as demais features dentro de bounds.
+    Retorna (ok True/False, counterexample or None).
+    """
+    if rng is None:
+        rng = np.random.RandomState(42)
+    # determinar target pela floresta se não passado
+    target = safe_rf_predict(rf_clf, instance)[0]
+
+    # transformar explan_pairs em set de índices
+    expl_feats = set(int(f) for f, _ in explan_pairs)
+
+    # montar bounds se não vierem
+    if feature_bounds is None:
+        feature_bounds = {}
+        try:
+            # usar thresholds do wrapper para bounds razoáveis
+            thresholds_by_feat = {}
+            for (feat, th) in rf_wrapper.binarization.keys():
+                thresholds_by_feat.setdefault(int(feat), []).append(float(th))
+            n_feats = getattr(rf_clf, "n_features_in_", instance.shape[0])
+            for feat in range(n_feats):
+                if feat in thresholds_by_feat:
+                    ths = sorted(thresholds_by_feat[feat])
+                    feature_bounds[feat] = (ths[0] - 1.0, ths[-1] + 1.0)
+                else:
+                    v = float(instance.iloc[feat])
+                    delta = max(abs(v) * 0.1, 1e-3)
+                    feature_bounds[feat] = (v - delta, v + delta)
+        except Exception:
+            # fallback simples baseado na instância
+            for feat in range(len(instance)):
+                v = float(instance.iloc[feat])
+                delta = max(abs(v) * 0.1, 1e-3)
+                feature_bounds[feat] = (v - delta, v + delta)
+
+    # executar perturbações
+    for t in range(n_trials):
+        inst2 = instance.astype(float).copy(deep=True)
+        for feat in range(len(instance)):
+            if feat in expl_feats:
+                # fixa
+                continue
+            low, high = feature_bounds[feat]
+            inst2.iloc[feat] = rng.uniform(low, high)
+        pred = safe_rf_predict(rf_clf, inst2)[0]
+        if pred != target:
+            return False, inst2
+    return True, None
+# ----------------------------
+def safe_rf_predict(rf_clf, series_or_df):
+    """
+    Usa rf_clf.predict com segurança, criando um DataFrame com os nomes de feature
+    se possível. Aceita como series_or_df:
+      - pd.Series (uma instância)
+      - pd.DataFrame (uma ou várias instâncias)
+      - np.ndarray ou lista (uma instância posicional)
+    Retorna o array de predições do sklearn.
+    """
+    # caso seja Series (uma instância)
+    if isinstance(series_or_df, pd.Series):
+        values = series_or_df.values
+        # tentar criar DataFrame com feature names do modelo
+        try:
+            cols = rf_clf.feature_names_in_
+            df = pd.DataFrame([values], columns=cols)
+        except Exception:
+            df = pd.DataFrame([values])
+        return rf_clf.predict(df)
+
+    # caso seja DataFrame (pode ser 1xN ou MxN)
+    if isinstance(series_or_df, pd.DataFrame):
+        df = series_or_df.copy()
+        # se o modelo sabe os nomes, ajusta as colunas posicionalmente (evita warnings)
+        try:
+            cols = rf_clf.feature_names_in_
+            if df.shape[1] == len(cols) and list(df.columns) != list(cols):
+                df.columns = cols
+        except Exception:
+            pass
+        return rf_clf.predict(df)
+
+    # caso seja lista/np.ndarray (uma instância posicional)
+    if isinstance(series_or_df, (list, tuple, np.ndarray)):
+        vals = np.array(series_or_df).ravel()
+        try:
+            cols = rf_clf.feature_names_in_
+            df = pd.DataFrame([vals], columns=cols)
+        except Exception:
+            df = pd.DataFrame([vals])
+        return rf_clf.predict(df)
+
+    # fallback: tentar passar diretamente (sklearn aceitará lista posicional)
+    return rf_clf.predict([series_or_df])
+def evaluate_explanations(rf_clf, rf_wrapper, X_test, n_instances=100, timeout_ms=3000, trials=500):
+    rng = np.random.RandomState(0)
+    results = {"idx": [], "is_suff_z3": [], "empirical_ok": [], "is_minimal": []}
+    N = min(n_instances, len(X_test))
+    for i in range(N):
+        inst = X_test.iloc[i]
+        expl_str = rf_wrapper.find_sufficient_reason(inst, z3=True)  # prefer Z3 explanation
+        expl_pairs = parse_expl_string(expl_str)
+        # formal check
+        is_suff, ce = verify_sufficiency_z3_forest(rf_wrapper, inst, expl_pairs, target=safe_rf_predict(rf_clf, inst)[0], timeout_ms=timeout_ms)
+        # empirical check
+        emp_ok, emp_ce = verify_sufficiency_random_perturbation(rf_clf, rf_wrapper, inst, explan_pairs=expl_pairs, n_trials=trials, rng=rng)
+        # minimality (formal, per-feature)
+        is_minimal, necessity = verify_minimality_z3(rf_wrapper, inst, expl_pairs, target=safe_rf_predict(rf_clf, inst)[0], timeout_ms=timeout_ms)
+        results["idx"].append(i)
+        results["is_suff_z3"].append(is_suff)
+        results["empirical_ok"].append(emp_ok)
+        results["is_minimal"].append(is_minimal)
+    # sumariza
+    import pandas as pd
+    df = pd.DataFrame(results)
+    print("Z3 pass rate:", df["is_suff_z3"].mean())
+    print("Empirical pass rate:", df["empirical_ok"].mean())
+    print("Minimality pass rate:", df["is_minimal"].mean())
+    return df
+
+def parse_expl_string(s):
+    """
+    Converte string do formato "[val == f_i, ...]" para [(i,val),...].
+    Aceita também lista/np.array já no formato.
+    """
+    import numpy as np
+    if s is None:
+        return []
+    if isinstance(s, (list, tuple, np.ndarray)):
+        return list(s)
+    s = s.strip()
+    if s == "[]" or s == "":
+        return []
+    if s.startswith("[") and s.endswith("]"):
+        s = s[1:-1].strip()
+    if s == "":
+        return []
+    pairs = []
+    for item in s.split(","):
+        item = item.strip()
+        if "==" not in item:
+            continue
+        left, right = item.split("==")
+        left = left.strip(); right = right.strip()
+        if not right.startswith("f_"):
+            continue
+        try:
+            feat_idx = int(right[2:])
+            val = float(left.replace("'", "").replace('"', ""))
+            pairs.append((feat_idx, val))
+        except Exception:
+            continue
+    return pairs
+
+def _model_eval_to_float(m, var):
+    """
+    Tenta extrair float do model.eval(var).
+    """
+    try:
+        v = m.eval(var, model_completion=True)
+        # as_decimal pode vir com ? if repeating; fallback para float(str)
+        try:
+            s = v.as_decimal(20)
+            if s.endswith('?'):
+                # repetir: converte via str
+                return float(str(v))
+            return float(s)
+        except Exception:
+            return float(str(v))
+    except Exception:
+        return None
+
+def verify_sufficiency_z3_forest(rf_wrapper, instance, explan_pairs, target=None, timeout_ms=3000):
+    """
+    Verifica com Z3 se explan_pairs ([(feat_idx,val),...]) garante a predição target da RandomForest.
+    Retorna (is_sufficient:bool, counterexample:dict or None)
+    - is_sufficient == True -> prova (UNSAT) que não existe contra-exemplo (dentro dos bounds)
+    - is_sufficient == False -> existe contra-exemplo; retorna model como dict feat->value
+    Observações:
+    - usa DecisionTreeWrapper.to_z3_formula para montar as fórmulas por árvore
+    - timeout_ms: milissegundos para Z3 (passa solver.set("timeout", timeout_ms))
+    """
+    # inferir target se não foi dado
+    if target is None:
+        rf = getattr(rf_wrapper, "forest", None)
+        if rf is None:
+            raise ValueError("target required if rf_wrapper has no underlying sklearn forest")
+        # garantir DataFrame com nomes (evita warning)
+        try:
+            target = rf.predict(pd.DataFrame([instance]))[0]
+        except Exception:
+            target = rf.predict([instance])[0]
+
+    # extrair lista de features da explicacao
+    path_feats = sorted([int(f) for f, _ in explan_pairs])
+
+    # montar variaveis globais f_i (Real)
+    n_feats = getattr(rf_wrapper.forest, "n_features_in_", None)
+    if n_feats is None:
+        max_feat = 0
+        for (f, t) in rf_wrapper.binarization.keys():
+            if int(f) > max_feat:
+                max_feat = int(f)
+        n_feats = max_feat + 1
+    global_f_vars = {i: Real(f"f_{i}") for i in range(n_feats)}
+
+    # construir fórmulas por árvore (substitute variables locais -> global_f_vars, y -> y_i)
+    tree_y_vars = []
+    tree_formulas = []
+    for ti, tree in enumerate(rf_wrapper.trees):
+        z3_vars_tree, y_tree, formula_tree = tree.to_z3_formula(binarized=False)
+        subs = []
+        for idx, old_var in z3_vars_tree.items():
+            if int(idx) in global_f_vars:
+                subs.append((old_var, global_f_vars[int(idx)]))
+        # renomear y
+        if y_tree.sort().kind() == Z3_BOOL_SORT:
+            new_y = Bool(f"y_{ti}")
+        else:
+            new_y = Real(f"y_{ti}")
+        subs.append((y_tree, new_y))
+        formula_sub = substitute(formula_tree, *subs)
+        tree_y_vars.append(new_y)
+        tree_formulas.append(formula_sub)
+
+    solver = Z3Solver()
+    solver.set("timeout", int(timeout_ms))
+    for f in tree_formulas:
+        solver.add(f)
+
+    # majority threshold
+    k = (len(tree_y_vars) // 2) + 1
+
+    # criar b_i onde b_i == 1 iff y_i == target
+    b_vars = []
+    for i, yvar in enumerate(tree_y_vars):
+        bi = Int(f"b_{i}")
+        if yvar.sort().kind() == Z3_BOOL_SORT:
+            solver.add(bi == If(yvar == BoolVal(bool(target)), IntVal(1), IntVal(0)))
+        else:
+            solver.add(bi == If(yvar == RealVal(float(target)), IntVal(1), IntVal(0)))
+        b_vars.append(bi)
+    major_sum = Sum(*b_vars)
+
+    # bounds por feature (usar thresholds do wrapper)
+    thresholds_by_feat = defaultdict(list)
+    for (feat, th) in rf_wrapper.binarization.keys():
+        thresholds_by_feat[int(feat)].append(float(th))
+    feature_bounds = {}
+    for feat in path_feats:
+        if feat in thresholds_by_feat and len(thresholds_by_feat[feat]) > 0:
+            ths = sorted(thresholds_by_feat[feat])
+            feature_bounds[int(feat)] = (ths[0] - 1.0, ths[-1] + 1.0)
+        else:
+            try:
+                base = float(instance.iloc[feat])
+            except Exception:
+                base = float(instance.loc[feat])
+            feature_bounds[int(feat)] = (base - 1.0, base + 1.0)
+
+    # constraints que fixam as features de explan_pairs
+    fixed_constraints = []
+    for feat_idx, val in explan_pairs:
+        v = global_f_vars[int(feat_idx)]
+        fixed_constraints.append(v == RealVal(float(val)))
+
+    # queremos saber se EXISTE atribuição que faz major_sum < k (i.e., majority invertida)
+    solver.push()
+    if fixed_constraints:
+        solver.add(And(*fixed_constraints))
+    solver.add(major_sum < k)
+    res = solver.check()
+    if res == sat:
+        model = solver.model()
+        # constuir contra-exemplo: tentar extrair valor para cada f_i
+        ce = {}
+        for i in range(n_feats):
+            v = global_f_vars[i]
+            try:
+                val = _model_eval_to_float(model, v)
+                if val is None:
+                    # model might not assign it; try model_completion
+                    eval_v = model.eval(v, model_completion=True)
+                    try:
+                        val = float(str(eval_v))
+                    except Exception:
+                        val = None
+                ce[i] = val
+            except Exception:
+                ce[i] = None
+        solver.pop()
+        return False, ce
+    else:
+        solver.pop()
+        return True, None
+
+def verify_minimality_z3(rf_wrapper, instance, explan_pairs, target=None, timeout_ms=3000):
+    """
+    Checa minimalidade formal: para cada feature em explan_pairs testa se E \\ {f} ainda é suficiente.
+    Retorna (is_minimal:bool, necessity: dict feat -> (is_necessary(bool), counterexample_or_None))
+    """
+    # inferir target se necessario
+    if target is None:
+        rf = getattr(rf_wrapper, "forest", None)
+        if rf is None:
+            raise ValueError("target required if rf_wrapper has no underlying sklearn forest")
+        try:
+            target = rf.predict(pd.DataFrame([instance]))[0]
+        except Exception:
+            target = rf.predict([instance])[0]
+
+    expl_feats = [int(f) for f, _ in explan_pairs]
+    necessity = {}
+    for feat in expl_feats:
+        subset = [(f, v) for f, v in explan_pairs if int(f) != int(feat)]
+        is_suff, ce = verify_sufficiency_z3_forest(rf_wrapper, instance, subset, target=target, timeout_ms=timeout_ms)
+        # if subset is sufficient -> feat not necessary (is_necessary False)
+        necessity[feat] = (not is_suff, ce)
+    is_minimal = all(v[0] for v in necessity.values())
+    return is_minimal, necessity
+
+# ----------------------------
+# Example usage (paste into main(), replace your previous verify call)
+# ----------------------------
+# after you computed:
+# wrapped_forest = RandomForestWrapper(first_forest)
+# suff_reason = wrapped_forest.find_sufficient_reason(instance, z3=True)  # prefer z3=True to get Z3-flavored string
+#
+# do:
+#
+# expl_pairs = parse_expl_string(suff_reason)
+# is_suff, ce = verify_sufficiency_z3_forest(wrapped_forest, instance, expl_pairs, timeout_ms=3000)
+# if is_suff:
+#     print("Z3 prova: explicação é suficiente.")
+# else:
+#     print("Z3 encontrou contra-exemplo (features->value):")
+#     print(ce)
+#
+# is_minimal, necessity = verify_minimality_z3(wrapped_forest, instance, expl_pairs, timeout_ms=3000)
+# print("É minimal?", is_minimal)
+# print("Necessidade por feature (feat_idx: (is_necessary, counterexample)):")
+# print(necessity)
+#
+# Observação: ao chamar rf.predict em código acima, usamos pd.DataFrame([instance]) para evitar aviso
+# "X does not have valid feature names".
 
 def get_x_y(dataset):
     X = dataset.iloc[:, :-1]  # everything except last column
@@ -98,137 +448,113 @@ def rf_cross_validation(data, n_trees, cv, n_forests=None):
 def main():
     # Use placement or compas for testing purposes
     fichier = "placement"
-    dataset = pd.read_csv(f"datasets/{fichier}.csv")
-    print("Dataset: ")
-    print(dataset)
+    dataset = pd.read_csv(f"../datasets/{fichier}.csv")
+    print("Dataset loaded, shape:", dataset.shape)
     print()
+
     avg_score, forests = rf_cross_validation(dataset, 25, 10)
-    print("avg_score: ")
-    print(avg_score)
-    print()
-    first_forest: RandomForestClassifier = forests[0][0]
-    first_train, first_test = forests[0][1], forests[0][2]
-    first_clf: DecisionTreeClassifier = first_forest.estimators_[1]
-    tree = first_clf.tree_
-
-    print("################################")
+    print("avg_score: ", avg_score)
     print()
 
-    print("Max depth: ")
-    print(tree.max_depth)
+    # escolha manual do índice da floresta
+    idx = 1   # <-- coloque aqui o índice desejado
+
+    # pegar a floresta escolhida (tupla: (clf, train_idx, test_idx, acc))
+    chosen_forest: RandomForestClassifier = forests[idx][0]
+    chosen_train, chosen_test = forests[idx][1], forests[idx][2]
+
+    # pegar a primeira árvore interna da floresta escolhida
+    chosen_clf: DecisionTreeClassifier = chosen_forest.estimators_[0]
+    tree = chosen_clf.tree_
+
+    print("Example tree: max_depth", tree.max_depth, " node_count", tree.node_count)
     print()
 
-    print("Node count: ")
-    print(tree.node_count)
-    print()
-
-    print("Children_left: ")
-    print(tree.children_left)
-    print(len(tree.children_left))
-    print()
-
-    print("children_right: ")
-    print(tree.children_right)
-    print(len(tree.children_right))
-    print()
-
-    print("features: ")
-    print(tree.feature)
-    print()
-
-    print("thresholds: ")
-    print(tree.threshold)
-    print()
-
-    print("values: ")
-    print([int(np.argmax(tree.value[i])) if tree.feature[i] == -2 else None for i in range(len(tree.feature))])
-    print([bool(np.argmax(tree.value[i])) if tree.feature[i] == -2 else None for i in range(len(tree.feature))])
-    print()
-
-    print("################################")
-    print()
-
+    # preparar instância de teste (primeira da base)
     X, y = get_x_y(dataset)
     instance = X.iloc[0]
-    clazz = y.iloc[0]
-    print("Instance: ")
+    print("Instance (positional values):")
     print(instance)
-    print(clazz)
     print()
 
-    print("Tree Explain instance: ")
-    for t_clf in first_forest.estimators_:
-        expl, pred = tree_explain_instance(t_clf, instance)
-        print(expl, pred)
+    # wrapper
+    wrapped_forest = RandomForestWrapper(chosen_forest)
+
+    # obter target de forma robusta (usa safe_rf_predict)
+    try:
+        target = safe_rf_predict(chosen_forest, instance)[0]
+    except Exception:
+        # fallback direto
+        target = chosen_forest.predict(pd.DataFrame([instance.values]))[0]
+    print("Model target for instance:", target)
     print()
 
-    print("Forest Explain instance: ")
-    f_expl = forest_explain_instance(first_forest, instance)
-    print(f_expl)
-    print(len(f_expl))
+    # calcular sufficient reason (prefira z3=True se você tem o modo z3)
+    suff_reason = wrapped_forest.find_sufficient_reason(instance, target=target, z3=True)
+    print("Sufficient reason (string):", suff_reason)
+    print(suff_reason)
+    expl_pairs = parse_expl_string(suff_reason)
+    print("Parsed explanation pairs:", expl_pairs)
+    print()
 
-    first_tree_map = DecisionTreeWrapper(first_clf)
-    print("\nTree Direct Reason:")
-    for t_clf in first_forest.estimators_:
-        wrapper = DecisionTreeWrapper(t_clf)
-        t_expl, t_pred = wrapper.find_direct_reason(instance, z3=True)
-        # pred = float(pred)
-        print(t_expl, t_pred)
-    # print(first_tree_map.get_direct_reason(X.iloc[0]))
+    # ---------- 1) verificação empírica (perturbações aleatórias) ----------
+    print("1) Empirical random perturbation check (n_trials=200)...")
+    emp_ok, emp_ce = verify_sufficiency_random_perturbation(chosen_forest, wrapped_forest, instance, explan_pairs=expl_pairs, n_trials=200)
+    if emp_ok:
+        print("  -> Empirical: no counterexample found in random trials.")
+    else:
+        print("  -> Empirical: counterexample found (inst):")
+        print(emp_ce)
+        try:
+            pred_ce = safe_rf_predict(chosen_forest, emp_ce)[0]
+            print("     model prediction for counterexample:", pred_ce)
+        except Exception:
+            print("     unable to re-predict counterexample with safe_rf_predict.")
+    print()
 
-    print("\nDecision Tree Sufficient Reason")
-    for t_clf in first_forest.estimators_:
-        wrapper = DecisionTreeWrapper(t_clf)
-        t_expl = wrapper.find_sufficient_reason(instance, int(wrapper.take_decision(instance)))
-        t_expl_z3 = wrapper.find_sufficient_reason(instance, int(wrapper.take_decision(instance)), z3=True)
-        # pred = float(pred)
-        # print(t_expl)
-        print(t_expl_z3)
-        print()
+    # ---------- 2) verificação formal Z3 ----------
+    print("2) Formal Z3 sufficiency check (timeout_ms=3000)...")
+    try:
+        is_suff, z3_ce = verify_sufficiency_z3_forest(wrapped_forest, instance, expl_pairs, target=target, timeout_ms=3000)
+        if is_suff:
+            print("  -> Z3: proved sufficient (no counterexample within bounds).")
+        else:
+            print("  -> Z3: counterexample found (dict feat_idx -> value):")
+            print(z3_ce)
+            # montar Series para testar predição (substitui None por valor original)
+            n_feats = getattr(wrapped_forest.forest, "n_features_in_", len(instance))
+            vals = []
+            for i in range(n_feats):
+                v = z3_ce.get(i, None) if isinstance(z3_ce, dict) else None
+                if v is None:
+                    vals.append(float(instance.iloc[i]))
+                else:
+                    vals.append(float(v))
+            ce_series = pd.Series(vals)
+            # tentar predizer o contra-exemplo
+            try:
+                pred_ce = safe_rf_predict(chosen_forest, ce_series)[0]
+                print("     model prediction for Z3 counterexample (constructed):", pred_ce)
+            except Exception:
+                print("     could not predict constructed z3 counterexample.")
+    except Exception as e:
+        print("  -> Z3 check failed / timeout / exception:", repr(e))
+        print("     treat as inconclusive or increase timeout_ms.")
+    print()
 
-    # suff_reason = wrapped_forest.find_sufficient_reason(instance, clazz)
-    # print(np.array(suff_reason), len(suff_reason))
+    # ---------- 3) checagem de minimalidade (formal) ----------
+    print("3) Minimality check (per-feature, Z3)...")
+    try:
+        is_minimal, necessity = verify_minimality_z3(wrapped_forest, instance, expl_pairs, target=target, timeout_ms=3000)
+        print("  -> Is minimal?", is_minimal)
+        print("  -> Necessity per feature:")
+        for feat_idx, info in necessity.items():
+            is_req, ce_feat = info
+            print(f"     feat {feat_idx}: necessary={is_req}, counterexample={ce_feat}")
+    except Exception as e:
+        print("  -> Minimality check failed / timeout / exception:", repr(e))
 
-    print("\nForest Direct Reason: ")
-    wrapped_forest = RandomForestWrapper(first_forest)
-    f_expl, f_pred, votes = wrapped_forest.find_direct_reason(instance)
-    print(f_expl, f_pred, votes, len(f_expl))
-    print(len(wrapped_forest.binarize_instance(instance)))
-
-    print("\nTree CNF Encoding: ")
-    print(first_tree_map.to_cnf(negate_tree=True))
-    print(first_tree_map.to_z3_formula())
-
-    # # print(len(wrapped_forest.binarization))
-
-    # # wrapped_forest.calc_cnf_h()
-
-    # print("\nRandom Forest Sufficient Reason")
-    # suff_reason = wrapped_forest.find_sufficient_reason(instance)
-    # print(np.array(suff_reason), len(suff_reason))
-
-    # print("###############################")
-    # test_count = 0
-    # for forest in forests:
-    #     test_wrapped_forest = RandomForestWrapper(forest[0])
-    #     f_test_X, f_test_y = get_x_y(dataset.iloc[forest[2]])
-    #     test_count += 1
-    #     print(f"\nWork on forest {test_count}")
-    #     for i in range(len(f_test_X)):
-    #         test_suff_reason = test_wrapped_forest.find_sufficient_reason(f_test_X.iloc[i])
-    #         print(np.array(test_suff_reason), len(test_suff_reason))
-
-    # forest_map = ForestFeatureThresholdMap(first_forest, feature_names=X.columns)
-    # print(forest_map.get_mapping())
-    # print(forest_map.get_tuples())
-    # # print(forest_map.get_human_readable())
-    #
-    # instance = X.iloc[0]
-    # valuation = forest_map.evaluate_instance(instance)
-    #
-    # print("\nValoração da floresta para a instância:")
-    # print(valuation)
-
+    print("\nDone.")
 
 if __name__ == "__main__":
     main()
