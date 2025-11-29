@@ -112,6 +112,7 @@ def safe_rf_predict(rf_clf, series_or_df):
 
     # fallback: tentar passar diretamente (sklearn aceitará lista posicional)
     return rf_clf.predict([series_or_df])
+
 def evaluate_explanations(rf_clf, rf_wrapper, X_test, n_instances=100, timeout_ms=3000, trials=500):
     rng = np.random.RandomState(0)
     results = {"idx": [], "is_suff_z3": [], "empirical_ok": [], "is_minimal": []}
@@ -447,8 +448,8 @@ def rf_cross_validation(data, n_trees, cv, n_forests=None):
 
 def main():
     # Use placement or compas for testing purposes
-    fichier = "placement"
-    dataset = pd.read_csv(f"../datasets/{fichier}.csv")
+    fichier = "bank"
+    dataset = pd.read_csv(f"datasets/{fichier}.csv")
     print("Dataset loaded, shape:", dataset.shape)
     print()
 
@@ -497,6 +498,14 @@ def main():
     print("Parsed explanation pairs:", expl_pairs)
     print()
 
+    # calcular majoritary reason (prefira z3=True se você tem o modo z3)
+    maj_reason = wrapped_forest.find_majoritary_reason(instance, target=target, z3=True)
+    print("Majoritary reason (string):", maj_reason)
+    print(maj_reason)
+    maj_expl_pairs = parse_expl_string(maj_reason)
+    print("Parsed explanation pairs:", maj_expl_pairs)
+    print()
+    
     # ---------- 1) verificação empírica (perturbações aleatórias) ----------
     print("1) Empirical random perturbation check (n_trials=200)...")
     emp_ok, emp_ce = verify_sufficiency_random_perturbation(chosen_forest, wrapped_forest, instance, explan_pairs=expl_pairs, n_trials=200)

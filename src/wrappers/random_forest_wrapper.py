@@ -346,6 +346,261 @@ class RandomForestWrapper:
                 resultado_unico.append((feat_idx, val))
 
         return _fmt_pairs_as_z3(resultado_unico)
+    
+    def is_majoritary_reason(self, candidate, h: CNF):
+        term_clause = [[l] for l in candidate]
+
+        combined = h.copy()   # ← importante!!!
+        combined.extend(term_clause)
+
+        with Solver(bootstrap_with=combined.clauses) as solver:
+            return not solver.solve()
+
+
+    def find_majoritary_reason(self, instance, target=None, hash_bin=None, binarized_instance=False, z3=True):
+        """
+        Retorna a menor Majoritary Reason:
+        conjunto mínimo de features que, quando liberadas, permite que
+        exista alguma instância que inverta a maioria da RandomForest.
+
+        Estrutura e estilo EXATAMENTE iguais à find_sufficient_reason,
+        para facilitar entendimento e comparação.
+        """
+
+        # ---- helper formatting (igual ao da sufficient_reason) ----
+        def _fmt_pairs_as_z3(pairs):
+            if not pairs:
+                return "[]"
+            items = []
+            for feat_idx, val in pairs:
+                try:
+                    fval = float(val)
+                    sval = str(int(fval)) if float(fval).is_integer() else str(fval)
+                except Exception:
+                    sval = str(val)
+                items.append(f"{sval} == f_{int(feat_idx)}")
+            return "[" + ", ".join(items) + "]"
+
+        # ----------------------- PREPARAÇÃO -----------------------
+        if hash_bin is None:
+            hash_bin = self.binarization
+
+        # predição original
+        pred = self.forest.predict([instance])
+        forest_class = bool(pred[0])
+        target_flipped = 1 - int(forest_class)
+
+        # implicant binarizado (igual ao sufficient reason)
+        if not binarized_instance:
+            implicant = list(self.binarize_instance(instance, reverse=True))
+        else:
+            implicant = list(instance)
+        implicant = [int(x) for x in implicant]
+        implicant.sort(key=abs, reverse=True)
+
+        # rev_hash: id -> (feat_idx, threshold)
+        rev_hash = {v: k for k, v in hash_bin.items()}
+
+        # -------------------------------------------------------
+        # ------------------------- MODO Z3 ---------------------
+        # -------------------------------------------------------
+        if z3:
+            try:
+                from z3 import (
+                    Real, Bool, Int, Sum, And, Or, If,
+                    RealVal, IntVal, BoolVal, substitute,
+                    Solver as Z3Solver
+                )
+                from z3.z3util import Z3_BOOL_SORT
+
+                # (1) Direct reason — igual ao sufficient_reason
+                direct_bin, forest_class_dr, vote_count = self.find_direct_reason(instance)
+                rev_hash_local = {v: k for k, v in self.binarization.items()}
+
+                # extrair features dos literais diretos
+                path_feats = set()
+                for lit in list(direct_bin):
+                    lit_abs = abs(int(lit))
+                    if lit_abs in rev_hash_local:
+                        feat_idx, _ = rev_hash_local[lit_abs]
+                        path_feats.add(int(feat_idx))
+
+                # fallback se vazio (igual sufficient)
+                if len(path_feats) == 0:
+                    for lit in implicant:
+                        lit_abs = abs(int(lit))
+                        if lit_abs in rev_hash:
+                            feat_idx, _ = rev_hash[lit_abs]
+                            path_feats.add(int(feat_idx))
+
+                path_feats = sorted(path_feats)
+
+                # (2) criar variáveis globais f_i
+                n_feats = getattr(self.forest, "n_features_in_", None)
+                if n_feats is None:
+                    max_feat = 0
+                    for (f, t) in self.binarization.keys():
+                        max_feat = max(max_feat, int(f))
+                    n_feats = max_feat + 1
+
+                global_f_vars = {i: Real(f"f_{i}") for i in range(n_feats)}
+
+                # (3) converter cada árvore para fórmula Z3 (idêntico)
+                tree_y_vars = []
+                tree_formulas = []
+                for ti, tree in enumerate(self.trees):
+                    z3_vars_tree, y_tree, formula_tree = tree.to_z3_formula(binarized=False)
+
+                    subs = []
+                    for idx, old_var in z3_vars_tree.items():
+                        if int(idx) in global_f_vars:
+                            subs.append((old_var, global_f_vars[int(idx)]))
+
+                    if y_tree.sort().kind() == Z3_BOOL_SORT:
+                        new_y = Bool(f"y_{ti}")
+                    else:
+                        new_y = Real(f"y_{ti}")
+                    subs.append((y_tree, new_y))
+
+                    formula_sub = substitute(formula_tree, *subs)
+                    tree_y_vars.append(new_y)
+                    tree_formulas.append(formula_sub)
+
+                # (4) bounds por feature (idêntico)
+                from collections import defaultdict
+                thresholds_by_feat = defaultdict(list)
+                for (f, t) in self.binarization.keys():
+                    thresholds_by_feat[int(f)].append(float(t))
+
+                feature_bounds = {}
+                for feat_idx in path_feats:
+                    if thresholds_by_feat[feat_idx]:
+                        ths = sorted(thresholds_by_feat[feat_idx])
+                        feature_bounds[feat_idx] = (ths[0] - 1.0, ths[-1] + 1.0)
+                    else:
+                        try:
+                            base = float(instance.iloc[feat_idx])
+                        except Exception:
+                            base = float(instance.loc[feat_idx])
+                        feature_bounds[feat_idx] = (base - 1.0, base + 1.0)
+
+                # (5) construir solver
+                solver = Z3Solver()
+                for fml in tree_formulas:
+                    solver.add(fml)
+
+                # threshold de maioria
+                k = (self.n_trees // 2) + 1
+
+                # (6) indicadores b_i (mas agora para o target invertido)
+                b_vars = []
+                for i, y in enumerate(tree_y_vars):
+                    b_i = Int(f"b_{i}")
+                    if y.sort().kind() == Z3_BOOL_SORT:
+                        solver.add(b_i == If(y == BoolVal(bool(target_flipped)), IntVal(1), IntVal(0)))
+                    else:
+                        solver.add(b_i == If(y == RealVal(float(target_flipped)), IntVal(1), IntVal(0)))
+                    b_vars.append(b_i)
+
+                major_sum = Sum(b_vars)
+                majority_flip = (major_sum >= k)
+
+                # -----------------------------------------------------------
+                #                 GREEDY PARA MAJORITARY REASON
+                # -----------------------------------------------------------
+
+                # No sufficient reason você fixa tudo e tenta remover.
+                # Aqui é o oposto: você libera tudo e tenta FIXAR apenas o necessário.
+
+                fixadas = set()         # features que NÃO podem variar
+                liberadas = set()       # features que podem variar
+
+                # inicialmente: nada é fixado -> tudo pode variar
+                # mas vamos testar uma a uma para ver se a variação é necessária
+
+                for feat_idx in path_feats:
+                    solver.push()
+
+                    # liberar: essa variável pode variar dentro do intervalo
+                    lb, ub = feature_bounds[feat_idx]
+                    solver.add(global_f_vars[feat_idx] >= RealVal(lb))
+                    solver.add(global_f_vars[feat_idx] <= RealVal(ub))
+
+                    # porém fixamos as outras (que ainda não foram liberadas)
+                    for ffix in fixadas:
+                        try:
+                            ival = float(instance.iloc[ffix])
+                        except Exception:
+                            ival = float(instance.loc[ffix])
+                        solver.add(global_f_vars[ffix] == RealVal(ival))
+
+                    solver.add(majority_flip)
+                    res = solver.check()
+
+                    solver.pop()
+
+                    if res == True:   # SAT => liberar essa feature permite flip
+                        liberadas.add(feat_idx)
+                    else:             # UNSAT => essa feature deve ser fixada
+                        fixadas.add(feat_idx)
+
+                # construir explicação legível
+                explicacao = []
+                for feat_idx in sorted(liberadas):
+                    try:
+                        val = float(instance.iloc[feat_idx])
+                    except Exception:
+                        val = float(instance.loc[feat_idx])
+                    explicacao.append((feat_idx, val))
+
+                if len(explicacao) > 0:
+                    return _fmt_pairs_as_z3(explicacao)
+
+            except Exception:
+                # qualquer erro → fallback CNF/guloso
+                pass
+
+        # -------------------------------------------------------
+        # ------------- MODO FALLBACK CNF/GULOSO ----------------
+        # -------------------------------------------------------
+
+        #igual à sufficient_reason, só que invertendo regra
+
+        h_cnf = self.calc_cnf_h(instance)
+
+        # greedy: features cujo valor altera possibilidade de inverter maioria
+        resultado = []
+        teste = implicant.copy()
+
+        i = 0
+        while i < len(teste):
+            cand = teste.copy()
+            # remover literal = liberar aquela feature
+            cand.pop(i)
+            if not self.is_sufficient_reason(cand, h_cnf):
+                # se deixar de fixar esse literal permite inverter → relevante
+                resultado.append(teste[i])
+                teste = cand
+            else:
+                i += 1
+
+        # converter para pares (feat_idx, valor original)
+        final = []
+        vistos = set()
+        for lit in resultado:
+            lit_abs = abs(int(lit))
+            if lit_abs in rev_hash:
+                feat_idx, _ = rev_hash[lit_abs]
+                if feat_idx not in vistos:
+                    vistos.add(feat_idx)
+                    try:
+                        val = float(instance.iloc[feat_idx])
+                    except Exception:
+                        val = float(instance.loc[feat_idx])
+                    final.append((feat_idx, val))
+
+        return _fmt_pairs_as_z3(final)
+
 
     def __len__(self):
         return sum([len(tree) for tree in self.trees])
