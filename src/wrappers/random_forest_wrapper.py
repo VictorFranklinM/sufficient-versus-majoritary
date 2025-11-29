@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 from pandas import Series
 from pysat.card import CardEnc
 from pysat.formula import CNF, IDPool
@@ -386,8 +387,10 @@ class RandomForestWrapper:
             hash_bin = self.binarization
 
         # predição original
-        pred = self.forest.predict([instance])
+        instance_df = pd.DataFrame([instance], columns=self.forest.feature_names_in_)
+        pred = self.forest.predict(instance_df)
         forest_class = bool(pred[0])
+
         target_flipped = 1 - int(forest_class)
 
         # implicant binarizado (igual ao sufficient reason)
