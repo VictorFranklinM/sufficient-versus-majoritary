@@ -71,14 +71,14 @@ def main():
         # Saving results
         results_dir = os.path.join("plots", "results")
         os.makedirs(results_dir, exist_ok=True)
-        csv_path = os.path.join(results_dir, f"{dataset_name}_results.csv")
+        csv_path = os.path.join(results_dir, f"{dataset}_results.csv")
         df_results.to_csv(csv_path, index=False)
         print(f"Data saved in: {csv_path}")
 
         # Plotting graphs
         print("Generating graphs...")
         generate_plots(df_results, dataset)
-        print(f"Finished: {dataset_name}\n")
+        print(f"Finished: {dataset}\n")
 
 def clean_pycache():
     root_dir = Path(".")
