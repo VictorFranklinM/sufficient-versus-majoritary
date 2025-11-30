@@ -464,6 +464,40 @@ class DecisionTreeWrapper:
                 formulas.append(Not(And(conds_only[i], conds_only[j])))
 
         return z3_vars, y, And(*formulas)
+    
+    def predict_z3(self, x_vars):
+        """
+        Dado um vetor de variáveis Z3 x_vars (ex.: [Real('x_0'), Real('x_1'), ...]),
+        retorna uma Z3 expression que avalia ao rótulo da árvore (0 ou 1) para essas variáveis.
+
+        Usa If(...) recursivamente para codificar as decisões dos nós.
+        """
+
+        from z3 import If, RealVal, IntVal
+
+        def _rec(node):
+            # se nó folha, retornar o valor da classe como IntVal(0/1)
+            if node is None:
+                # deveria não acontecer
+                return IntVal(0)
+            if node.value is not None:
+                # node.value no seu wrapper é bool — converte para 0/1
+                return IntVal(1) if bool(node.value) else IntVal(0)
+
+            # nó interno: node.var é (feat_idx, threshold)
+            feat_idx, th = node.var
+            # pegar var Z3 correspondente — assumimos x_vars indexável por feat_idx
+            xv = x_vars[int(feat_idx)]
+            # comparação: xv <= th  (use RealVal para o threshold)
+            cond = xv <= RealVal(float(th))
+            # construir expressões para as duas ramificações
+            left_expr = _rec(node.left)
+            right_expr = _rec(node.right)
+            # retornar If(cond, left_expr, right_expr)
+            return If(cond, left_expr, right_expr)
+
+        return _rec(self.root)
+
 
     def to_cnf(self, hash_bin=None, negate_tree=False):
         if hash_bin is None:

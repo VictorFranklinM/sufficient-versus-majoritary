@@ -357,6 +357,89 @@ class RandomForestWrapper:
         with Solver(bootstrap_with=combined.clauses) as solver:
             return not solver.solve()
 
+    def z3_check_majority_necessity(
+        self,
+        instance,
+        reduced_pairs,
+        target,
+        timeout_ms=3000
+    ):
+        """
+        Verifica necessidade de uma feature para o Majoritary Reason.
+
+        Retorna:
+            (is_necessary: bool, counterexample_dict or None)
+
+        Lógica:
+            exists x :
+                x satisfaz reduced_pairs
+                AND majority_vote(x) != target
+        """
+
+        from z3 import Solver, Real, Int, And, Or, Not, If, Sum
+
+        solver = Solver()
+        solver.set("timeout", timeout_ms)
+
+        n_features = len(instance)
+
+        # ------------------------------------
+        # 1) Criar variáveis Z3 para cada feature
+        # ------------------------------------
+        x = [Real(f"x_{i}") for i in range(n_features)]
+
+        # ------------------------------------
+        # 2) Fixar as features presentes em reduced_pairs
+        # ------------------------------------
+        for feat, value in reduced_pairs:
+            solver.add(x[int(feat)] == float(value))
+
+        # ------------------------------------
+        # 3) Para features não especificadas, permitir qualquer valor real
+        #    Você pode restringir domínios se quiser (ex: min/max do dataset)
+        # ------------------------------------
+        # Neste exemplo deixamos livres.
+
+        # ------------------------------------
+        # 4) Codificar a votação das árvores
+        # ------------------------------------
+        votes = []
+        for ti, tree in enumerate(self.trees):
+            # cada árvore deve ter um método predict_z3(x)
+            # que retorne um z3 Bool ou Int indicando classe
+            vote = tree.predict_z3(x)
+            # força a árvore votar 0 ou 1
+            votes.append(If(vote == 1, 1, 0))
+
+        # soma total de votos
+        vote_sum = Sum(votes)
+
+        # threshold de maioria (> metade das árvores)
+        threshold = (len(self.trees) // 2) + 1
+
+        if int(target) == 1:
+            solver.add(vote_sum < threshold)  # queremos NÃO obter maioria para o target
+        else:
+            solver.add(vote_sum >= threshold)  # caso target=0, queremos maioria de 1 (oposto)
+
+        # ------------------------------------
+        # 5) Verificar satisfatibilidade
+        # ------------------------------------
+        sat = solver.check()
+        if sat != 1:  # unsat or unknown
+            return (False, None)
+
+        # ------------------------------------
+        # 6) Extrair contraexemplo
+        # ------------------------------------
+        model = solver.model()
+
+        counterexample = [
+            float(model[x[i]].as_decimal(10).replace("?", "")) if model[x[i]] is not None else float(instance[i])
+            for i in range(n_features)
+        ]
+
+        return (True, counterexample)
 
     def find_majoritary_reason(self, instance, target=None, hash_bin=None, binarized_instance=False, z3=True):
         """
