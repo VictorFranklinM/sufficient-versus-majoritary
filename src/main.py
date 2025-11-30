@@ -7,6 +7,9 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import KFold
 
+from src.experiments import benchmark_explanations
+from src.plots import generate_plots
+
 MAX_RANDOM_FOREST_DEPTH = 8
 
 
