@@ -48,7 +48,7 @@ def main():
         database[f.split('.')[0]] = pd.read_csv(f"datasets/{f}")
 
     for dataset_name in database.keys():
-        if dataset not in tree_amount_info.keys(): continue
+        if dataset_name not in tree_amount_info.keys(): continue
         print(f"Work on {dataset_name}")
         tree_amount = tree_amount_info[dataset_name]
         fold = 10
