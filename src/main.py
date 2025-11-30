@@ -47,12 +47,12 @@ def main():
             continue
         database[f.split('.')[0]] = pd.read_csv(f"datasets/{f}")
 
-    for dataset in database.keys():
+    for dataset_name in database.keys():
         if dataset not in tree_amount_info.keys(): continue
-        print(f"Work on {dataset}")
-        tree_amount = tree_amount_info[dataset]
+        print(f"Work on {dataset_name}")
+        tree_amount = tree_amount_info[dataset_name]
         fold = 10
-        ds = database[dataset].copy()
+        ds = database[dataset_name].copy()
 
         # Training
         print(f"Training Random Forest ({tree_amount} trees)...")
@@ -71,14 +71,14 @@ def main():
         # Saving results
         results_dir = os.path.join("plots", "results")
         os.makedirs(results_dir, exist_ok=True)
-        csv_path = os.path.join(results_dir, f"{dataset}_results.csv")
+        csv_path = os.path.join(results_dir, f"{dataset_name}_results.csv")
         df_results.to_csv(csv_path, index=False)
         print(f"Data saved in: {csv_path}")
 
         # Plotting graphs
         print("Generating graphs...")
-        generate_plots(df_results, dataset)
-        print(f"Finished: {dataset}\n")
+        generate_plots(df_results, dataset_name)
+        print(f"Finished: {dataset_name}\n")
 
 def clean_pycache():
     root_dir = Path(".")
