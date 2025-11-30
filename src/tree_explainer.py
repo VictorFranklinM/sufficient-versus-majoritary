@@ -112,6 +112,7 @@ def safe_rf_predict(rf_clf, series_or_df):
 
     # fallback: tentar passar diretamente (sklearn aceitará lista posicional)
     return rf_clf.predict([series_or_df])
+
 def evaluate_explanations(rf_clf, rf_wrapper, X_test, n_instances=100, timeout_ms=3000, trials=500):
     rng = np.random.RandomState(0)
     results = {"idx": [], "is_suff_z3": [], "empirical_ok": [], "is_minimal": []}
@@ -313,6 +314,156 @@ def verify_sufficiency_z3_forest(rf_wrapper, instance, explan_pairs, target=None
     else:
         solver.pop()
         return True, None
+    
+def verify_majoritary_z3_forest(rf_wrapper, instance, explan_pairs, target=None, timeout_ms=3000):
+    """
+    Versão reforçada / robusta de verificação Z3.
+    Retorna (is_sufficient: bool, counterexample: dict or None)
+    """
+    # --- inferir target se necessário (sklearn predict) ---
+    if target is None:
+        rf = getattr(rf_wrapper, "forest", None)
+        if rf is None:
+            raise ValueError("target required if rf_wrapper has no underlying sklearn forest")
+        try:
+            target = rf.predict(pd.DataFrame([instance]))[0]
+        except Exception:
+            target = rf.predict([instance])[0]
+
+    # converte target para boolean e int (0/1) usados em Z3
+    target_bool = bool(target)
+    target_as_boolval = BoolVal(target_bool)
+    target_as_realval = RealVal(float(int(target_bool)))  # 0.0 ou 1.0
+
+    # features list (vindas da explicação)
+    path_feats = sorted([int(f) for f, _ in explan_pairs])
+
+    # número de features e vars globais
+    n_feats = getattr(rf_wrapper.forest, "n_features_in_", None)
+    if n_feats is None:
+        max_feat = -1
+        for (f, t) in rf_wrapper.binarization.keys():
+            if int(f) > max_feat:
+                max_feat = int(f)
+        n_feats = max_feat + 1
+    global_f_vars = {i: Real(f"f_{i}") for i in range(n_feats)}
+
+    # montar fórmulas por árvore (substituir var_local -> global_f_vars, y->y_i)
+    tree_y_vars = []
+    tree_formulas = []
+    for ti, tree in enumerate(rf_wrapper.trees):
+        z3_vars_tree, y_tree, formula_tree = tree.to_z3_formula(binarized=False)
+        subs = []
+        for idx, old_var in z3_vars_tree.items():
+            idx_int = int(idx)
+            if idx_int in global_f_vars:
+                subs.append((old_var, global_f_vars[idx_int]))
+        # renomear y para y_{ti}
+        if y_tree.sort().kind() == Z3_BOOL_SORT:
+            new_y = Bool(f"y_{ti}")
+        else:
+            new_y = Real(f"y_{ti}")
+        subs.append((y_tree, new_y))
+        formula_sub = substitute(formula_tree, *subs)
+        tree_y_vars.append(new_y)
+        tree_formulas.append(formula_sub)
+
+    # criar solver e adicionar fórmulas das árvores
+    solver = Z3Solver()
+    solver.set("timeout", int(timeout_ms))
+    for f in tree_formulas:
+        solver.add(f)
+
+    # majority threshold k
+    k = (len(tree_y_vars) // 2) + 1
+
+    # criar b_i onde b_i == 1 iff y_i == target_bool (compativel com y sort)
+    b_vars = []
+    for i, yvar in enumerate(tree_y_vars):
+        bi = Int(f"b_{i}")
+        if yvar.sort().kind() == Z3_BOOL_SORT:
+            solver.add(bi == If(yvar == target_as_boolval, IntVal(1), IntVal(0)))
+        else:
+            solver.add(bi == If(yvar == target_as_realval, IntVal(1), IntVal(0)))
+        b_vars.append(bi)
+    major_sum = Sum(*b_vars)
+
+    # --- bounds por feature (usar thresholds do wrapper quando existir) ---
+    thresholds_by_feat = defaultdict(list)
+    for (feat, th) in rf_wrapper.binarization.keys():
+        thresholds_by_feat[int(feat)].append(float(th))
+
+    feature_bounds = {}
+    # garanto bounds para todas as features (não apenas path_feats)
+    for feat in range(n_feats):
+        if feat in thresholds_by_feat and len(thresholds_by_feat[feat]) > 0:
+            ths = sorted(thresholds_by_feat[feat])
+            feature_bounds[feat] = (ths[0] - 1.0, ths[-1] + 1.0)
+        else:
+            # usar valor da instância se possível; caso contrário usar (-1e6, +1e6)
+            try:
+                base = float(instance.iloc[feat])
+            except Exception:
+                try:
+                    base = float(instance.loc[feat])
+                except Exception:
+                    base = 0.0
+            delta = max(abs(base) * 0.1, 1e-3)
+            feature_bounds[feat] = (base - delta, base + delta)
+
+    # constraints que FIXAM as features da explicação (explan_pairs)
+    fixed_constraints = []
+    for feat_idx, val in explan_pairs:
+        idx = int(feat_idx)
+        v = global_f_vars[idx]
+        fixed_constraints.append(v == RealVal(float(val)))
+
+    # --- testar existência de contra-exemplo: existe x tal que (fixed_constraints) & (major_sum < k) ? ---
+    solver.push()
+    if fixed_constraints:
+        solver.add(And(*fixed_constraints))
+
+    # garantir que cada variável não-fixada esteja dentro dos bounds para que solver ache soluções válidas
+    bounds_constraints = []
+    for feat in range(n_feats):
+        # se a feature está fixada em fixed_constraints já coberta; mesmo assim bounds são seguros
+        lb, ub = feature_bounds[feat]
+        v = global_f_vars[feat]
+        bounds_constraints.append(And(v >= RealVal(lb), v <= RealVal(ub)))
+    if bounds_constraints:
+        solver.add(And(*bounds_constraints))
+
+    # adicionar condição de existência de contra-exemplo: majority < k
+    solver.add(major_sum < k)
+
+    res = solver.check()
+    if res == sat:
+        model = solver.model()
+        # construir contra-exemplo (feature -> valor)
+        ce = {}
+        for i in range(n_feats):
+            v = global_f_vars[i]
+            try:
+                val = _model_eval_to_float(model, v)
+                if val is None:
+                    eval_v = model.eval(v, model_completion=True)
+                    try:
+                        val = float(str(eval_v))
+                    except Exception:
+                        val = None
+                ce[i] = val
+            except Exception:
+                ce[i] = None
+        solver.pop()
+        return False, ce
+    elif res == unsat:
+        solver.pop()
+        return True, None
+    else:
+        # unknown / timeout -> inconclusivo: tratar como não provado (retorna False, None)
+        solver.pop()
+        return False, None
+
 
 def verify_minimality_z3(rf_wrapper, instance, explan_pairs, target=None, timeout_ms=3000):
     """
@@ -338,6 +489,55 @@ def verify_minimality_z3(rf_wrapper, instance, explan_pairs, target=None, timeou
         necessity[feat] = (not is_suff, ce)
     is_minimal = all(v[0] for v in necessity.values())
     return is_minimal, necessity
+
+
+def verify_majoritary_minimality_z3(
+    rf_wrapper,
+    instance,
+    majoritary_pairs,
+    target=None,
+    timeout_ms=3000
+):
+    """
+    Checa minimalidade majoritária via Z3.
+    Para cada feature f em M:
+        testa se existe x que satisfaz M\\{f} E faz a maioria inverter.
+    Retorna (is_minimal, necessity_dict) onde necessity_dict[feat] = (is_necessary, counterexample_or_None)
+    (is_necessary == True significa: a feature é necessária para impedir a inversão).
+    """
+    if target is None:
+        rf = getattr(rf_wrapper, "forest", None)
+        if rf is None:
+            raise ValueError("target required if rf_wrapper has no underlying sklearn forest")
+        try:
+            target = rf.predict(pd.DataFrame([instance]))[0]
+        except Exception:
+            target = rf.predict([instance])[0]
+
+    necessity = {}
+    M = [(int(f), v) for f, v in majoritary_pairs]
+
+    for feat, val in M:
+        # M sem feat
+        M_reduced = [(f, v) for f, v in M if int(f) != int(feat)]
+
+        # verify_majoritary_z3_forest retorna:
+        #   (True, None)  -> M_reduced NÃO admite contra-exemplo (UNSAT)
+        #   (False, ce)   -> existe contra-exemplo (SAT)
+        is_suff, ce = verify_majoritary_z3_forest(
+            rf_wrapper, instance, M_reduced, target=target, timeout_ms=timeout_ms
+        )
+
+        # agora: se is_suff == True -> M_reduced não permite flip => feat é necessária
+        is_necessary = bool(is_suff)
+        counterexample = ce  # pode ser None ou dict
+        necessity[feat] = (is_necessary, counterexample)
+
+    is_minimal = all(v[0] for v in necessity.values())
+    return is_minimal, necessity
+
+
+
 
 # ----------------------------
 # Example usage (paste into main(), replace your previous verify call)
@@ -447,8 +647,8 @@ def rf_cross_validation(data, n_trees, cv, n_forests=None):
 
 def main():
     # Use placement or compas for testing purposes
-    fichier = "placement"
-    dataset = pd.read_csv(f"../datasets/{fichier}.csv")
+    fichier = "bank"
+    dataset = pd.read_csv(f"datasets/{fichier}.csv")
     print("Dataset loaded, shape:", dataset.shape)
     print()
 
@@ -497,6 +697,14 @@ def main():
     print("Parsed explanation pairs:", expl_pairs)
     print()
 
+    # calcular majoritary reason (prefira z3=True se você tem o modo z3)
+    maj_reason = wrapped_forest.find_majoritary_reason(instance, target=target, z3=True)
+    print("Majoritary reason (string):", maj_reason)
+    print(maj_reason)
+    maj_expl_pairs = parse_expl_string(maj_reason)
+    print("Parsed explanation pairs:", maj_expl_pairs)
+    print()
+    
     # ---------- 1) verificação empírica (perturbações aleatórias) ----------
     print("1) Empirical random perturbation check (n_trials=200)...")
     emp_ok, emp_ce = verify_sufficiency_random_perturbation(chosen_forest, wrapped_forest, instance, explan_pairs=expl_pairs, n_trials=200)
@@ -555,6 +763,49 @@ def main():
         print("  -> Minimality check failed / timeout / exception:", repr(e))
 
     print("\nDone.")
+
+    print("\n====================")
+    print(" MAJORITY REASON CHECK")
+    print("====================\n")
+
+    # ---------- 1) Empirical check ----------
+    print("1) Empirical random perturbation check (Majoritary)...")
+    emp_ok, emp_ce = verify_sufficiency_random_perturbation(
+        chosen_forest, wrapped_forest, instance,
+        explan_pairs=maj_expl_pairs, n_trials=200
+    )
+    if emp_ok:
+        print("  -> Empirical: no counterexample found for majoritary reason.")
+    else:
+        print("  -> Empirical: counterexample found for majoritary reason:")
+        print(emp_ce)
+    print()
+
+    # ---------- 2) Formal Z3 check ----------
+    print("2) Formal Z3 sufficiency check for Majoritary Reason...")
+    is_suff, z3_ce = verify_majoritary_z3_forest(
+        wrapped_forest, instance, maj_expl_pairs,
+        target=target, timeout_ms=3000
+    )
+    if is_suff:
+        print("  -> Z3: majoritary reason is sufficient (no CE).")
+    else:
+        print("  -> Z3: counterexample found for majoritary reason:")
+        print(z3_ce)
+    print()
+
+    # ---------- 3) Minimality check ----------
+    print("3) Minimality check for Majoritary Reason...")
+    is_minimal, necessity = verify_majoritary_minimality_z3(
+        wrapped_forest, instance, maj_expl_pairs,
+        target=target, timeout_ms=3000
+    )
+    print("  -> Is minimal?", is_minimal)
+    print("  -> Necessity per feature:")
+    for feat_idx, info in necessity.items():
+        print(f"     feat {feat_idx}: necessary={info[0]}, counterexample={info[1]}")
+    print()
+
 
 if __name__ == "__main__":
     main()
