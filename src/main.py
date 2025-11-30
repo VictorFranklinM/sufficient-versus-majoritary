@@ -50,9 +50,42 @@ def main():
         fold = 10
         ds = database[dataset].copy()
 
+        # Training
+        print(f"Training Random Forest ({tree_amount} trees)...")
         score, forests = rf_cross_validation(ds, tree_amount, fold)
-        print(f"{score=}")
+        print(f"Accuracy Score: {score:.2f}%")
 
+        # Benchmark
+        first_forest_model = forests[0][0]
+        test_indices = forests[0][2]
+        test_data = ds.iloc[test_indices]
+        X_test = test_data.iloc[:, :-1] # Remove a coluna target
+
+        print(f"Explaining samples...")
+        df_results = benchmark_explanations(first_forest_model, X_test, n_samples=25)
+        
+        # Saving results
+        results_dir = os.path.join("plots", "results")
+        os.makedirs(results_dir, exist_ok=True)
+        csv_path = os.path.join(results_dir, f"{dataset_name}_results.csv")
+        df_results.to_csv(csv_path, index=False)
+        print(f"Data saved in: {csv_path}")
+
+        # Plotting graphs
+        print("Generating graphs...")
+        generate_plots(df_results, dataset)
+        print(f"Finished: {dataset_name}\n")
+
+def clean_pycache():
+    root_dir = Path(".")
+    for cache_dir in root_dir.rglob("__pycache__"):
+        if cache_dir.is_dir():
+            shutil.rmtree(cache_dir)
+            print(f"Cleaning: Cache removed from {cache_dir}")
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    finally:
+        print("\nCleaning temp archives...")
+        clean_pycache()
