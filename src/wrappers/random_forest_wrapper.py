@@ -7,7 +7,7 @@ from sklearn.ensemble import RandomForestClassifier
 from z3 import Solver as Z3Solver, Real, Bool, Int, If, Sum, And, Or, Not, RealVal, IntVal, BoolVal, substitute, sat, unsat, Z3_REAL_SORT, Z3_BOOL_SORT
 from collections import defaultdict
 
-from src.wrappers import DecisionTreeWrapper
+from .decision_tree_wrapper import DecisionTreeWrapper
 
 class RandomForestWrapper:
     def __init__(self, clf: RandomForestClassifier):
