@@ -43,13 +43,14 @@ def main():
                         "mnist38": 85, "dexter": 101, "recidivism": 25, "higgs-boson": 95, "placement": 25}
 
     for f in fichiers:
-        if f != "placement.csv":
+        if f not in ["placement.csv", "bank.csv", "compas.csv", "compas-col.csv", "recidivism.csv"]:
             continue
         database[f.split('.')[0]] = pd.read_csv(f"datasets/{f}")
 
+
     for dataset_name in database.keys():
         if dataset_name not in tree_amount_info.keys(): continue
-        print(f"Work on {dataset_name}")
+        print(f"Working on {dataset_name}")
         tree_amount = tree_amount_info[dataset_name]
         fold = 10
         ds = database[dataset_name].copy()
