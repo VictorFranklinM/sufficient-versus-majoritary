@@ -43,13 +43,14 @@ def main():
                         "mnist38": 85, "dexter": 101, "recidivism": 25, "higgs-boson": 95, "placement": 25}
 
     for f in fichiers:
-        if f not in ["placement.csv", "bank.csv", "compas.csv", "compas-col.csv", "recidivism.csv"]:
+        if f not in ["placement.csv", "compas.csv", "recidivism.csv"]:
             continue
         database[f.split('.')[0]] = pd.read_csv(f"datasets/{f}")
 
 
     for dataset_name in database.keys():
-        if dataset_name not in tree_amount_info.keys(): continue
+        if dataset_name not in tree_amount_info.keys():
+            continue
         print(f"Working on {dataset_name}")
         tree_amount = tree_amount_info[dataset_name]
         fold = 10
@@ -61,32 +62,49 @@ def main():
         print(f"Accuracy Score: {score:.2f}%")
 
         # Benchmark
-        first_forest_model = forests[0][0]
-        test_indices = forests[0][2]
-        test_data = ds.iloc[test_indices]
-        X_test = test_data.iloc[:, :-1] # Remove a coluna target
+        print(f"Calculating explanations for all {len(forests)} folds...")
+        all_results_dfs = []
+        for i, (rf_model, train_idx, test_idx) in enumerate(forests):
+            print(f"\n  > Processing Fold {i+1}/{len(forests)}...")
+            
+            # Reconstrói os dados de teste deste fold específico
+            test_data = ds.iloc[test_idx]
+            X_test = test_data.iloc[:, :-1]
 
-        print(f"Explaining samples...")
-        df_results = benchmark_explanations(first_forest_model, X_test, n_samples=25)
+            # Roda o benchmark para este modelo específico
+            df_fold = benchmark_explanations(rf_model, X_test, n_samples=25)
+            
+            # Adiciona identificador do fold (opcional, útil para debug)
+            df_fold['Fold'] = i
+            all_results_dfs.append(df_fold)
+
+        # Junta todos os resultados num único DataFrame
+        if all_results_dfs:
+            df_results = pd.concat(all_results_dfs, ignore_index=True)
         
-        # Saving results
-        results_dir = os.path.join("plots", "results")
-        os.makedirs(results_dir, exist_ok=True)
-        csv_path = os.path.join(results_dir, f"{dataset_name}_results.csv")
-        df_results.to_csv(csv_path, index=False)
-        print(f"Data saved in: {csv_path}")
+            # Saving results
+            dataset_output_dir = os.path.join("plots", dataset_name)
+            os.makedirs(dataset_output_dir, exist_ok=True)
+            csv_path = os.path.join(dataset_output_dir, f"{dataset_name}_results.csv")
+            df_results.to_csv(csv_path, index=False)
+            print(f"Data saved in: {csv_path}")
 
-        # Plotting graphs
-        print("Generating graphs...")
-        generate_plots(df_results, dataset_name)
-        print(f"Finished: {dataset_name}\n")
+            # Plotting graphs
+            print("Generating graphs...")
+            generate_plots(df_results, dataset_name, output_dir=dataset_output_dir)
+            print(f"Finished: {dataset_output_dir}\n")
+        else:
+            print("No results generated.")
 
 def clean_pycache():
     root_dir = Path(".")
     for cache_dir in root_dir.rglob("__pycache__"):
         if cache_dir.is_dir():
-            shutil.rmtree(cache_dir)
-            print(f"Cleaning: Cache removed from {cache_dir}")
+            try:
+                shutil.rmtree(cache_dir)
+                print(f"Cleaning: Cache removed from {cache_dir}")
+            except Exception:
+                pass
 
 if __name__ == '__main__':
     try:
