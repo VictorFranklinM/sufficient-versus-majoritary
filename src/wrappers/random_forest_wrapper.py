@@ -347,15 +347,13 @@ class RandomForestWrapper:
                 resultado_unico.append((feat_idx, val))
 
         return _fmt_pairs_as_z3(resultado_unico)
-    
-    def is_majoritary_reason(self, candidate, h: CNF):
-        term_clause = [[l] for l in candidate]
 
-        combined = h.copy()   # ← importante!!!
-        combined.extend(term_clause)
-
-        with Solver(bootstrap_with=combined.clauses) as solver:
-            return not solver.solve()
+    def is_majoritary_reason(self, candidate_literals, h_cnf: CNF) -> bool:
+        """
+        Retorna True se fixando candidate_literals **não** existe contra-exemplo,
+        i.e., fixação IMPEDIRIA o flip (essa fixação é 'suficiente' para bloquear flip).
+        """
+        return not self.allows_majority_flip(candidate_literals, h_cnf)
 
     def z3_check_majority_necessity(
         self,
@@ -425,8 +423,8 @@ class RandomForestWrapper:
         # ------------------------------------
         # 5) Verificar satisfatibilidade
         # ------------------------------------
-        sat = solver.check()
-        if sat != 1:  # unsat or unknown
+        res = solver.check()
+        if res != sat:
             return (False, None)
 
         # ------------------------------------
@@ -440,6 +438,22 @@ class RandomForestWrapper:
         ]
 
         return (True, counterexample)
+
+    def allows_majority_flip(self, candidate_literals, h_cnf: CNF) -> bool:
+        """
+        Retorna True se, **fixando** os literais em candidate_literals,
+        existe uma atribuição que INVERTE a maioria (ou seja: existe contra-exemplo).
+        candidate_literals: lista de literais binários (ex: [64, -19, ...])
+        h_cnf: CNF que representa a condição 'maioria pode ser invertida' (calc_cnf_h)
+        """
+        term_clause = [[l] for l in candidate_literals]
+
+        combined = h_cnf.copy()
+        combined.extend(term_clause)
+
+        from pysat.solvers import Solver as PySatSolver
+        with PySatSolver(bootstrap_with=combined.clauses) as solver:
+            return solver.solve()  # True se SAT => existe contra-exemplo (flip)
 
     def find_majoritary_reason(self, instance, target=None, hash_bin=None, binarized_instance=False, z3=True):
         """
@@ -625,7 +639,7 @@ class RandomForestWrapper:
 
                     solver.pop()
 
-                    if res == True:   # SAT => liberar essa feature permite flip
+                    if res == sat:   # SAT => liberar essa feature permite flip
                         liberadas.add(feat_idx)
                     else:             # UNSAT => essa feature deve ser fixada
                         fixadas.add(feat_idx)
@@ -663,11 +677,12 @@ class RandomForestWrapper:
             cand = teste.copy()
             # remover literal = liberar aquela feature
             cand.pop(i)
-            if not self.is_sufficient_reason(cand, h_cnf):
+            if self.allows_majority_flip(cand, h_cnf):
                 # se deixar de fixar esse literal permite inverter → relevante
                 resultado.append(teste[i])
                 teste = cand
             else:
+                # se NÃO existe contra-exemplo -> precisa manter esse literal fixado
                 i += 1
 
         # converter para pares (feat_idx, valor original)
