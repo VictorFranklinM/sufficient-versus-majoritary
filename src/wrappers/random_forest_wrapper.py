@@ -501,6 +501,36 @@ class RandomForestWrapper:
         # rev_hash: id -> (feat_idx, threshold)
         rev_hash = {v: k for k, v in hash_bin.items()}
 
+        # --------------------------------------------------------
+        # CALCULAR path_feats AQUI (usar antes do if z3) — assim
+        # fallback CNF/guloso e modo Z3 usam o mesmo conjunto inicial
+        # --------------------------------------------------------
+        try:
+            # rev hash a partir do hash_bin passado (compatível com o parâmetro)
+            rev_hash_local = {v: k for k, v in hash_bin.items()}
+
+            # extrair features do direct reason (se houver)
+            direct_bin, _, _ = self.find_direct_reason(instance)
+            path_feats = set()
+            for lit in list(direct_bin):
+                lit_abs = abs(int(lit))
+                if lit_abs in rev_hash_local:
+                    feat_idx, _ = rev_hash_local[lit_abs]
+                    path_feats.add(int(feat_idx))
+
+            # fallback: se direct reason não trouxe nada, derive de implicant
+            if len(path_feats) == 0:
+                for lit in implicant:
+                    lit_abs = abs(int(lit))
+                    if lit_abs in rev_hash:
+                        feat_idx, _ = rev_hash[lit_abs]
+                        path_feats.add(int(feat_idx))
+
+            path_feats = sorted(path_feats)  # ordena de forma determinística
+        except Exception:
+            # em caso de erro, mantemos path_feats = None para preservar comportamento anterior
+            path_feats = None
+
         # -------------------------------------------------------
         # ------------------------- MODO Z3 ---------------------
         # -------------------------------------------------------
@@ -517,23 +547,23 @@ class RandomForestWrapper:
                 direct_bin, forest_class_dr, vote_count = self.find_direct_reason(instance)
                 rev_hash_local = {v: k for k, v in self.binarization.items()}
 
-                # extrair features dos literais diretos
-                path_feats = set()
-                for lit in list(direct_bin):
-                    lit_abs = abs(int(lit))
-                    if lit_abs in rev_hash_local:
-                        feat_idx, _ = rev_hash_local[lit_abs]
-                        path_feats.add(int(feat_idx))
-
-                # fallback se vazio (igual sufficient)
-                if len(path_feats) == 0:
-                    for lit in implicant:
+                # extrair features dos literais diretos (se ainda estiver vazio, usamos o path_feats pré-calculado)
+                if path_feats is None or len(path_feats) == 0:
+                    # se path_feats não foi calculado com sucesso, tente extrair aqui como fallback
+                    path_feats_local = set()
+                    for lit in list(direct_bin):
                         lit_abs = abs(int(lit))
-                        if lit_abs in rev_hash:
-                            feat_idx, _ = rev_hash[lit_abs]
-                            path_feats.add(int(feat_idx))
-
-                path_feats = sorted(path_feats)
+                        if lit_abs in rev_hash_local:
+                            feat_idx, _ = rev_hash_local[lit_abs]
+                            path_feats_local.add(int(feat_idx))
+                    if len(path_feats_local) == 0:
+                        for lit in implicant:
+                            lit_abs = abs(int(lit))
+                            if lit_abs in rev_hash:
+                                feat_idx, _ = rev_hash[lit_abs]
+                                path_feats_local.add(int(feat_idx))
+                    path_feats = sorted(path_feats_local)
+                # caso já tenhamos path_feats calculado, mantém
 
                 # (2) criar variáveis globais f_i
                 n_feats = getattr(self.forest, "n_features_in_", None)
@@ -573,7 +603,10 @@ class RandomForestWrapper:
                     thresholds_by_feat[int(f)].append(float(t))
 
                 feature_bounds = {}
-                for feat_idx in path_feats:
+                # se path_feats for None -> usar fallback por todas as features da binarization
+                feats_to_consider = path_feats if path_feats is not None and len(path_feats) > 0 else list(
+                    thresholds_by_feat.keys())
+                for feat_idx in feats_to_consider:
                     if thresholds_by_feat[feat_idx]:
                         ths = sorted(thresholds_by_feat[feat_idx])
                         feature_bounds[feat_idx] = (ths[0] - 1.0, ths[-1] + 1.0)
@@ -612,17 +645,17 @@ class RandomForestWrapper:
                 # No sufficient reason você fixa tudo e tenta remover.
                 # Aqui é o oposto: você libera tudo e tenta FIXAR apenas o necessário.
 
-                fixadas = set()         # features que NÃO podem variar
-                liberadas = set()       # features que podem variar
+                fixadas = set()  # features que NÃO podem variar
+                liberadas = set()  # features que podem variar
 
                 # inicialmente: nada é fixado -> tudo pode variar
                 # mas vamos testar uma a uma para ver se a variação é necessária
 
-                for feat_idx in path_feats:
+                for feat_idx in (path_feats if path_feats is not None else []):
                     solver.push()
 
                     # liberar: essa variável pode variar dentro do intervalo
-                    lb, ub = feature_bounds[feat_idx]
+                    lb, ub = feature_bounds.get(feat_idx, (-1e6, 1e6))
                     solver.add(global_f_vars[feat_idx] >= RealVal(lb))
                     solver.add(global_f_vars[feat_idx] <= RealVal(ub))
 
@@ -639,9 +672,9 @@ class RandomForestWrapper:
 
                     solver.pop()
 
-                    if res == sat:   # SAT => liberar essa feature permite flip
+                    if res == sat:  # SAT => liberar essa feature permite flip
                         liberadas.add(feat_idx)
-                    else:             # UNSAT => essa feature deve ser fixada
+                    else:  # UNSAT => essa feature deve ser fixada
                         fixadas.add(feat_idx)
 
                 # construir explicação legível
@@ -664,13 +697,18 @@ class RandomForestWrapper:
         # ------------- MODO FALLBACK CNF/GULOSO ----------------
         # -------------------------------------------------------
 
-        #igual à sufficient_reason, só que invertendo regra
-
         h_cnf = self.calc_cnf_h(instance)
 
         # greedy: features cujo valor altera possibilidade de inverter maioria
         resultado = []
-        teste = implicant.copy()
+        # Se temos path_feats, filtrar implicant para só testar literais dessas features.
+        if path_feats is not None:
+            feats_set = set(path_feats)
+            # manter ordem similar ao used pelo Z3 (ordem por path_feats)
+            teste = [lit for lit in implicant
+                     if abs(int(lit)) in rev_hash and rev_hash[abs(int(lit))][0] in feats_set]
+        else:
+            teste = implicant.copy()
 
         i = 0
         while i < len(teste):
@@ -701,7 +739,6 @@ class RandomForestWrapper:
                     final.append((feat_idx, val))
 
         return _fmt_pairs_as_z3(final)
-
 
     def __len__(self):
         return sum([len(tree) for tree in self.trees])
