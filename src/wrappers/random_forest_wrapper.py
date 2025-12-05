@@ -699,46 +699,87 @@ class RandomForestWrapper:
 
         h_cnf = self.calc_cnf_h(instance)
 
-        # greedy: features cujo valor altera possibilidade de inverter maioria
-        resultado = []
+        # greedy: testar por feature (inverter feature) cujo valor altera possibilidade de inverter maioria
+        resultado_feats = []  # lista de feat_idx que são relevantes (manter ordem)
         # Se temos path_feats, filtrar implicant para só testar literais dessas features.
         if path_feats is not None:
             feats_set = set(path_feats)
-            # manter ordem similar ao used pelo Z3 (ordem por path_feats)
+            # manter ordem similar ao usado pelo Z3 (ordem por path_feats)
             teste = [lit for lit in implicant
-                     if abs(int(lit)) in rev_hash and rev_hash[abs(int(lit))][0] in feats_set]
+                    if abs(int(lit)) in rev_hash and rev_hash[abs(int(lit))][0] in feats_set]
         else:
             teste = implicant.copy()
 
         i = 0
+        processed_feats = set()
         while i < len(teste):
+            lit_i = teste[i]
+            lit_abs = abs(int(lit_i))
+            if lit_abs not in rev_hash:
+                # se literal não mapeia para feature, manter comportamento anterior (inverter só esse literal)
+                cand = teste.copy()
+                cand[i] = -cand[i]
+                if self.allows_majority_flip(cand, h_cnf):
+                    # relevante — marca literal (mas depois convertemos para feature)
+                    feat_idx = None
+                    try:
+                        feat_idx = rev_hash[lit_abs][0]
+                    except Exception:
+                        pass
+                    if feat_idx is not None and feat_idx not in processed_feats:
+                        processed_feats.add(feat_idx)
+                        resultado_feats.append(feat_idx)
+                    # atualizamos teste para refletir a inversão (mantendo consistência com seu algoritmo original)
+                    teste = cand
+                else:
+                    i += 1
+                continue
+
+            # determinar qual feature este literal representa
+            feat_idx = rev_hash[lit_abs][0]
+
+            # pular se já processamos essa feature (evita re-testar múltiplos literais da mesma feature)
+            if feat_idx in processed_feats:
+                # avançar para o próximo literal que pertença a outra feature
+                i += 1
+                continue
+
+            # construir candidato onde TODOS os literais correspondentes a feat_idx são invertidos
             cand = teste.copy()
-            # remover literal = liberar aquela feature
-            cand.pop(i)
+            for j, lit in enumerate(cand):
+                lit_abs_j = abs(int(lit))
+                if lit_abs_j in rev_hash and rev_hash[lit_abs_j][0] == feat_idx:
+                    cand[j] = -cand[j]  # inverter literal dessa feature
+
+            # testar: inverter essa feature permite inverter a maioria?
             if self.allows_majority_flip(cand, h_cnf):
-                # se deixar de fixar esse literal permite inverter → relevante
-                resultado.append(teste[i])
+                # sim -> essa feature é relevante (liberada permite flip)
+                processed_feats.add(feat_idx)
+                resultado_feats.append(feat_idx)
+                # atualizar teste para refletir essa inversão (seguir seu algoritmo original que "aceita" a mudança)
                 teste = cand
+                # não avançamos i (pois teste mudou e indexes mudam) -> manter i = 0 para reavaliar na nova lista
+                i = 0
             else:
-                # se NÃO existe contra-exemplo -> precisa manter esse literal fixado
+                # não -> essa feature precisa ficar fixada (irrelevante para ser liberada)
+                processed_feats.add(feat_idx)
                 i += 1
 
-        # converter para pares (feat_idx, valor original)
+        # converter resultado_feats para pares (feat_idx, valor original)
         final = []
         vistos = set()
-        for lit in resultado:
-            lit_abs = abs(int(lit))
-            if lit_abs in rev_hash:
-                feat_idx, _ = rev_hash[lit_abs]
-                if feat_idx not in vistos:
-                    vistos.add(feat_idx)
-                    try:
-                        val = float(instance.iloc[feat_idx])
-                    except Exception:
-                        val = float(instance.loc[feat_idx])
-                    final.append((feat_idx, val))
+        for feat_idx in resultado_feats:
+            if feat_idx in vistos:
+                continue
+            vistos.add(feat_idx)
+            try:
+                val = float(instance.iloc[feat_idx])
+            except Exception:
+                val = float(instance.loc[feat_idx])
+            final.append((feat_idx, val))
 
         return _fmt_pairs_as_z3(final)
+
 
     def __len__(self):
         return sum([len(tree) for tree in self.trees])

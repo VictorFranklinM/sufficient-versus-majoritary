@@ -647,7 +647,7 @@ def rf_cross_validation(data, n_trees, cv, n_forests=None):
 
 def main():
     # Use placement or compas for testing purposes
-    fichier = "bank"
+    fichier = "placement"
     dataset = pd.read_csv(f"datasets/{fichier}.csv")
     print("Dataset loaded, shape:", dataset.shape)
     print()
@@ -657,7 +657,7 @@ def main():
     print()
 
     # escolha manual do índice da floresta
-    idx = 1   # <-- coloque aqui o índice desejado
+    idx = 9   # <-- coloque aqui o índice desejado
 
     # pegar a floresta escolhida (tupla: (clf, train_idx, test_idx, acc))
     chosen_forest: RandomForestClassifier = forests[idx][0]
@@ -698,7 +698,7 @@ def main():
     print()
 
     # calcular majoritary reason (prefira z3=True se você tem o modo z3)
-    maj_reason = wrapped_forest.find_majoritary_reason(instance, target=target, z3=True)
+    maj_reason = wrapped_forest.find_majoritary_reason(instance, target=target, z3=False)
     print("Majoritary reason (string):", maj_reason)
     print(maj_reason)
     maj_expl_pairs = parse_expl_string(maj_reason)
