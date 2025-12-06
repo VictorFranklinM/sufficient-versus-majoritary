@@ -647,164 +647,169 @@ def rf_cross_validation(data, n_trees, cv, n_forests=None):
 
 def main():
     # Use placement or compas for testing purposes
-    fichier = "placement"
+    fichier = "bank"
     dataset = pd.read_csv(f"datasets/{fichier}.csv")
     print("Dataset loaded, shape:", dataset.shape)
     print()
 
-    avg_score, forests = rf_cross_validation(dataset, 25, 10)
+    avg_score, forests = rf_cross_validation(dataset, 21, 10)
     print("avg_score: ", avg_score)
     print()
 
-    # escolha manual do índice da floresta
-    idx = 9   # <-- coloque aqui o índice desejado
+    for i in range(10):
+        # escolha manual do índice da floresta
+        idx = i   # <-- coloque aqui o índice desejado
 
-    # pegar a floresta escolhida (tupla: (clf, train_idx, test_idx, acc))
-    chosen_forest: RandomForestClassifier = forests[idx][0]
-    chosen_train, chosen_test = forests[idx][1], forests[idx][2]
+        # pegar a floresta escolhida (tupla: (clf, train_idx, test_idx, acc))
+        chosen_forest: RandomForestClassifier = forests[idx][0]
+        chosen_train, chosen_test = forests[idx][1], forests[idx][2]
 
-    # pegar a primeira árvore interna da floresta escolhida
-    chosen_clf: DecisionTreeClassifier = chosen_forest.estimators_[0]
-    tree = chosen_clf.tree_
+        # pegar a primeira árvore interna da floresta escolhida
+        chosen_clf: DecisionTreeClassifier = chosen_forest.estimators_[0]
+        tree = chosen_clf.tree_
 
-    print("Example tree: max_depth", tree.max_depth, " node_count", tree.node_count)
-    print()
+        
+        #print("Example tree: max_depth", tree.max_depth, " node_count", tree.node_count)
+        #print()
 
-    # preparar instância de teste (primeira da base)
-    X, y = get_x_y(dataset)
-    instance = X.iloc[0]
-    print("Instance (positional values):")
-    print(instance)
-    print()
+        # preparar instância de teste (primeira da base)
+        X, y = get_x_y(dataset)
+        instance = X.iloc[0]
+        #print("Instance (positional values):")
+        #print(instance)
+        #print()
 
-    # wrapper
-    wrapped_forest = RandomForestWrapper(chosen_forest)
+        # wrapper
+        wrapped_forest = RandomForestWrapper(chosen_forest)
 
-    # obter target de forma robusta (usa safe_rf_predict)
-    try:
-        target = safe_rf_predict(chosen_forest, instance)[0]
-    except Exception:
-        # fallback direto
-        target = chosen_forest.predict(pd.DataFrame([instance.values]))[0]
-    print("Model target for instance:", target)
-    print()
-
-    # calcular sufficient reason (prefira z3=True se você tem o modo z3)
-    suff_reason = wrapped_forest.find_sufficient_reason(instance, target=target, z3=True)
-    print("Sufficient reason (string):", suff_reason)
-    print(suff_reason)
-    expl_pairs = parse_expl_string(suff_reason)
-    print("Parsed explanation pairs:", expl_pairs)
-    print()
-
-    # calcular majoritary reason (prefira z3=True se você tem o modo z3)
-    maj_reason = wrapped_forest.find_majoritary_reason(instance, target=target, z3=False)
-    print("Majoritary reason (string):", maj_reason)
-    print(maj_reason)
-    maj_expl_pairs = parse_expl_string(maj_reason)
-    print("Parsed explanation pairs:", maj_expl_pairs)
-    print()
-    
-    # ---------- 1) verificação empírica (perturbações aleatórias) ----------
-    print("1) Empirical random perturbation check (n_trials=200)...")
-    emp_ok, emp_ce = verify_sufficiency_random_perturbation(chosen_forest, wrapped_forest, instance, explan_pairs=expl_pairs, n_trials=200)
-    if emp_ok:
-        print("  -> Empirical: no counterexample found in random trials.")
-    else:
-        print("  -> Empirical: counterexample found (inst):")
-        print(emp_ce)
+        # obter target de forma robusta (usa safe_rf_predict)
         try:
-            pred_ce = safe_rf_predict(chosen_forest, emp_ce)[0]
-            print("     model prediction for counterexample:", pred_ce)
+            target = safe_rf_predict(chosen_forest, instance)[0]
         except Exception:
-            print("     unable to re-predict counterexample with safe_rf_predict.")
-    print()
+            # fallback direto
+            target = chosen_forest.predict(pd.DataFrame([instance.values]))[0]
+        #print("Model target for instance:", target)
+        #print()
 
-    # ---------- 2) verificação formal Z3 ----------
-    print("2) Formal Z3 sufficiency check (timeout_ms=3000)...")
-    try:
-        is_suff, z3_ce = verify_sufficiency_z3_forest(wrapped_forest, instance, expl_pairs, target=target, timeout_ms=3000)
-        if is_suff:
-            print("  -> Z3: proved sufficient (no counterexample within bounds).")
+        # calcular sufficient reason (prefira z3=True se você tem o modo z3)
+        #suff_reason = wrapped_forest.find_sufficient_reason(instance, target=target, z3=True)
+        #print("Sufficient reason (string):", suff_reason)
+        #print(suff_reason)
+        #expl_pairs = parse_expl_string(suff_reason)
+        #print("Parsed explanation pairs:", expl_pairs)
+        #print()
+
+        # calcular majoritary reason (prefira z3=True se você tem o modo z3)
+        maj_reason = wrapped_forest.find_majoritary_reason(instance, target=target, z3=False)
+        print("Majoritary reason (string):", maj_reason)
+        print(maj_reason)
+        maj_expl_pairs = parse_expl_string(maj_reason)
+        print("Parsed explanation pairs:", maj_expl_pairs)
+        print()
+
+        """
+        
+        # ---------- 1) verificação empírica (perturbações aleatórias) ----------
+        print("1) Empirical random perturbation check (n_trials=200)...")
+        emp_ok, emp_ce = verify_sufficiency_random_perturbation(chosen_forest, wrapped_forest, instance, explan_pairs=expl_pairs, n_trials=200)
+        if emp_ok:
+            print("  -> Empirical: no counterexample found in random trials.")
         else:
-            print("  -> Z3: counterexample found (dict feat_idx -> value):")
-            print(z3_ce)
-            # montar Series para testar predição (substitui None por valor original)
-            n_feats = getattr(wrapped_forest.forest, "n_features_in_", len(instance))
-            vals = []
-            for i in range(n_feats):
-                v = z3_ce.get(i, None) if isinstance(z3_ce, dict) else None
-                if v is None:
-                    vals.append(float(instance.iloc[i]))
-                else:
-                    vals.append(float(v))
-            ce_series = pd.Series(vals)
-            # tentar predizer o contra-exemplo
+            print("  -> Empirical: counterexample found (inst):")
+            print(emp_ce)
             try:
-                pred_ce = safe_rf_predict(chosen_forest, ce_series)[0]
-                print("     model prediction for Z3 counterexample (constructed):", pred_ce)
+                pred_ce = safe_rf_predict(chosen_forest, emp_ce)[0]
+                print("     model prediction for counterexample:", pred_ce)
             except Exception:
-                print("     could not predict constructed z3 counterexample.")
-    except Exception as e:
-        print("  -> Z3 check failed / timeout / exception:", repr(e))
-        print("     treat as inconclusive or increase timeout_ms.")
-    print()
+                print("     unable to re-predict counterexample with safe_rf_predict.")
+        print()
 
-    # ---------- 3) checagem de minimalidade (formal) ----------
-    print("3) Minimality check (per-feature, Z3)...")
-    try:
-        is_minimal, necessity = verify_minimality_z3(wrapped_forest, instance, expl_pairs, target=target, timeout_ms=3000)
+        # ---------- 2) verificação formal Z3 ----------
+        print("2) Formal Z3 sufficiency check (timeout_ms=3000)...")
+        try:
+            is_suff, z3_ce = verify_sufficiency_z3_forest(wrapped_forest, instance, expl_pairs, target=target, timeout_ms=3000)
+            if is_suff:
+                print("  -> Z3: proved sufficient (no counterexample within bounds).")
+            else:
+                print("  -> Z3: counterexample found (dict feat_idx -> value):")
+                print(z3_ce)
+                # montar Series para testar predição (substitui None por valor original)
+                n_feats = getattr(wrapped_forest.forest, "n_features_in_", len(instance))
+                vals = []
+                for i in range(n_feats):
+                    v = z3_ce.get(i, None) if isinstance(z3_ce, dict) else None
+                    if v is None:
+                        vals.append(float(instance.iloc[i]))
+                    else:
+                        vals.append(float(v))
+                ce_series = pd.Series(vals)
+                # tentar predizer o contra-exemplo
+                try:
+                    pred_ce = safe_rf_predict(chosen_forest, ce_series)[0]
+                    print("     model prediction for Z3 counterexample (constructed):", pred_ce)
+                except Exception:
+                    print("     could not predict constructed z3 counterexample.")
+        except Exception as e:
+            print("  -> Z3 check failed / timeout / exception:", repr(e))
+            print("     treat as inconclusive or increase timeout_ms.")
+        print()
+
+        # ---------- 3) checagem de minimalidade (formal) ----------
+        print("3) Minimality check (per-feature, Z3)...")
+        try:
+            is_minimal, necessity = verify_minimality_z3(wrapped_forest, instance, expl_pairs, target=target, timeout_ms=3000)
+            print("  -> Is minimal?", is_minimal)
+            print("  -> Necessity per feature:")
+            for feat_idx, info in necessity.items():
+                is_req, ce_feat = info
+                print(f"     feat {feat_idx}: necessary={is_req}, counterexample={ce_feat}")
+        except Exception as e:
+            print("  -> Minimality check failed / timeout / exception:", repr(e))
+
+        print("\nDone.")
+
+        print("\n====================")
+        print(" MAJORITY REASON CHECK")
+        print("====================\n")
+
+        # ---------- 1) Empirical check ----------
+        print("1) Empirical random perturbation check (Majoritary)...")
+        emp_ok, emp_ce = verify_sufficiency_random_perturbation(
+            chosen_forest, wrapped_forest, instance,
+            explan_pairs=maj_expl_pairs, n_trials=200
+        )
+        if emp_ok:
+            print("  -> Empirical: no counterexample found for majoritary reason.")
+        else:
+            print("  -> Empirical: counterexample found for majoritary reason:")
+            print(emp_ce)
+        print()
+
+        # ---------- 2) Formal Z3 check ----------
+        print("2) Formal Z3 sufficiency check for Majoritary Reason...")
+        is_suff, z3_ce = verify_majoritary_z3_forest(
+            wrapped_forest, instance, maj_expl_pairs,
+            target=target, timeout_ms=3000
+        )
+        if is_suff:
+            print("  -> Z3: majoritary reason is sufficient (no CE).")
+        else:
+            print("  -> Z3: counterexample found for majoritary reason:")
+            print(z3_ce)
+        print()
+
+        # ---------- 3) Minimality check ----------
+        print("3) Minimality check for Majoritary Reason...")
+        is_minimal, necessity = verify_majoritary_minimality_z3(
+            wrapped_forest, instance, maj_expl_pairs,
+            target=target, timeout_ms=3000
+        )
         print("  -> Is minimal?", is_minimal)
         print("  -> Necessity per feature:")
         for feat_idx, info in necessity.items():
-            is_req, ce_feat = info
-            print(f"     feat {feat_idx}: necessary={is_req}, counterexample={ce_feat}")
-    except Exception as e:
-        print("  -> Minimality check failed / timeout / exception:", repr(e))
-
-    print("\nDone.")
-
-    print("\n====================")
-    print(" MAJORITY REASON CHECK")
-    print("====================\n")
-
-    # ---------- 1) Empirical check ----------
-    print("1) Empirical random perturbation check (Majoritary)...")
-    emp_ok, emp_ce = verify_sufficiency_random_perturbation(
-        chosen_forest, wrapped_forest, instance,
-        explan_pairs=maj_expl_pairs, n_trials=200
-    )
-    if emp_ok:
-        print("  -> Empirical: no counterexample found for majoritary reason.")
-    else:
-        print("  -> Empirical: counterexample found for majoritary reason:")
-        print(emp_ce)
-    print()
-
-    # ---------- 2) Formal Z3 check ----------
-    print("2) Formal Z3 sufficiency check for Majoritary Reason...")
-    is_suff, z3_ce = verify_majoritary_z3_forest(
-        wrapped_forest, instance, maj_expl_pairs,
-        target=target, timeout_ms=3000
-    )
-    if is_suff:
-        print("  -> Z3: majoritary reason is sufficient (no CE).")
-    else:
-        print("  -> Z3: counterexample found for majoritary reason:")
-        print(z3_ce)
-    print()
-
-    # ---------- 3) Minimality check ----------
-    print("3) Minimality check for Majoritary Reason...")
-    is_minimal, necessity = verify_majoritary_minimality_z3(
-        wrapped_forest, instance, maj_expl_pairs,
-        target=target, timeout_ms=3000
-    )
-    print("  -> Is minimal?", is_minimal)
-    print("  -> Necessity per feature:")
-    for feat_idx, info in necessity.items():
-        print(f"     feat {feat_idx}: necessary={info[0]}, counterexample={info[1]}")
-    print()
+            print(f"     feat {feat_idx}: necessary={info[0]}, counterexample={info[1]}")
+        print()
+        """
 
 
 if __name__ == "__main__":
