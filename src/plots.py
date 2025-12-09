@@ -34,7 +34,7 @@ def generate_plots(df_results, dataset_name, output_dir="plots"):
         ax=ax1
     )
     ax1.set_xscale("log")
-    ax1.set_title(f"Complexity vs Sparsity ({dataset_name})")
+    ax1.set_title("")
     ax1.set_xlabel("Time (s) - Log Scale")
     ax1.grid(True, which="both", ls="--", linewidth=0.5)
 
@@ -46,7 +46,7 @@ def generate_plots(df_results, dataset_name, output_dir="plots"):
         medianprops={'color': 'red', 'linewidth': 1.5},
         ax=ax2
     )
-    ax2.set_title(f"Size Distribution ({dataset_name})")
+    ax2.set_title("")
     ax2.set_xlabel("")
     ax2.tick_params(axis='x', rotation=30)
 
@@ -81,7 +81,7 @@ def generate_plots(df_results, dataset_name, output_dir="plots"):
             ax3.set_xlim(min_val, max_val)
             ax3.set_ylim(min_val, max_val)
 
-        ax3.set_title(f"Trade-off: {col_x} vs {col_y}")
+        ax3.set_title("")
         ax3.set_xlabel(col_x)
         ax3.set_ylabel(col_y)
         ax3.legend()
@@ -95,3 +95,4 @@ def generate_plots(df_results, dataset_name, output_dir="plots"):
     plt.savefig(filename, dpi=300)
     print(f"Graphs saved in: {filename}")
     plt.close()
+
