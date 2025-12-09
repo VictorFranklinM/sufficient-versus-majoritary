@@ -35,7 +35,7 @@ def generate_plots(df_results, dataset_name, output_dir="plots"):
     )
     ax1.set_xscale("log")
     ax1.set_title("")
-    ax1.set_xlabel("Time (s) - Log Scale")
+    ax1.set_xlabel("Time (s)")
     ax1.grid(True, which="both", ls="--", linewidth=0.5)
 
     # 2) Boxplot Size Distribution
@@ -95,4 +95,5 @@ def generate_plots(df_results, dataset_name, output_dir="plots"):
     plt.savefig(filename, dpi=300)
     print(f"Graphs saved in: {filename}")
     plt.close()
+
 
