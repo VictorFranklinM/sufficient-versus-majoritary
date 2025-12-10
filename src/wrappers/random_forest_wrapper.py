@@ -454,6 +454,8 @@ class RandomForestWrapper:
         from pysat.solvers import Solver as PySatSolver
         with PySatSolver(bootstrap_with=combined.clauses) as solver:
             return solver.solve()  # True se SAT => existe contra-exemplo (flip)
+        
+
 
     def find_majoritary_reason(self, instance, target=None, hash_bin=None, binarized_instance=False, z3=True):
         """
@@ -699,46 +701,172 @@ class RandomForestWrapper:
 
         h_cnf = self.calc_cnf_h(instance)
 
-        # greedy: features cujo valor altera possibilidade de inverter maioria
-        resultado = []
-        # Se temos path_feats, filtrar implicant para só testar literais dessas features.
+        # Debug: informações iniciais — comente/remova em produção
+        """
+        try:
+            print(f"DEBUG: implicant (len={len(implicant)}): sample={implicant[:20]}")
+        except Exception:
+            print("DEBUG: implicant (could not print sample)")
+        
+
+        print(f"DEBUG: rev_hash keys sample: {list(rev_hash.keys())[:30]}")
+        print(f"DEBUG: path_feats: {path_feats}")
+        """
+
+        # Normalize implicant -> lista de ints (defensivo)
+        normalized_implicant = []
+        for lit in implicant:
+            try:
+                lit_int = int(str(lit))
+                normalized_implicant.append(lit_int)
+            except Exception:
+                # log e pular literal não convertível
+                #print(f"DEBUG: ignorando literal não convertível: {lit}")
+                continue
+
+        # Se path_feats fornecido, normalizar para ints também (se possível)
+        feats_set = None
         if path_feats is not None:
-            feats_set = set(path_feats)
-            # manter ordem similar ao used pelo Z3 (ordem por path_feats)
-            teste = [lit for lit in implicant
-                     if abs(int(lit)) in rev_hash and rev_hash[abs(int(lit))][0] in feats_set]
+            try:
+                feats_set = set(int(x) for x in path_feats)
+            except Exception:
+                # fallback: usar path_feats como veio (pode ser labels)
+                try:
+                    feats_set = set(path_feats)
+                except Exception:
+                    feats_set = None
+            #print(f"DEBUG: feats_set (normalized) sample: {list(feats_set)[:20] if feats_set is not None else 'None'}")
+
+        # preparar 'teste' (lista de literais normalizados) aplicando filtro por path_feats se houver
+        if feats_set is not None:
+            teste = [lit for lit in normalized_implicant
+                    if (lit in rev_hash and rev_hash[lit][0] in feats_set)]
         else:
-            teste = implicant.copy()
+            teste = normalized_implicant.copy()
+
+        #print(f"DEBUG: teste after filter (len={len(teste)}): sample={teste[:30]}")
+
+        # (assumindo que você já imprimiu 'teste' e 'rev_hash keys sample' como antes)
+
+        #print(f"DEBUG: instance.shape: {getattr(instance, 'shape', None)}")
+        """
+        try:
+            print(f"DEBUG: instance.index sample: {list(instance.index)[:20]}")
+        except Exception:
+            pass
+        """
+        # coletar alguns lit_abs únicos para inspecionar mapping rev_hash -> feat_idx
+        sample_lits = [abs(int(x)) for x in teste[:40]]
+        mapped_feats = {}
+        for lit_abs in sample_lits:
+            try:
+                mapped_feats[lit_abs] = rev_hash[lit_abs][0]
+            except Exception:
+                mapped_feats[lit_abs] = None
+        #print(f"DEBUG: sample rev_hash mapping (lit_abs -> feat_idx) sample: {mapped_feats}")
 
         i = 0
+        processed_feats = set()
+        resultado_feats = []
+
+        # wrapper declarado antes do loop
+        def try_all_sign_conventions(cand, h_cnf):
+            try:
+                res = self.allows_majority_flip(cand, h_cnf)
+            except Exception as e:
+                #print(f"DEBUG: allows_majority_flip error with cand: {e}")
+                res = False
+            if res:
+                return True, cand
+            cand_inv = [-int(x) for x in cand]
+            try:
+                res_inv = self.allows_majority_flip(cand_inv, h_cnf)
+            except Exception as e:
+                #print(f"DEBUG: allows_majority_flip error with cand_inv: {e}")
+                res_inv = False
+            if res_inv:
+                return True, cand_inv
+            return False, None
+
+        i = 0
+        processed_feats = set()
+        resultado_feats = []
+
         while i < len(teste):
+            lit_i = teste[i]
+            lit_abs = abs(int(lit_i))
+            if lit_abs not in rev_hash:
+                cand = teste.copy()
+                cand[i] = -cand[i]
+                ok, accepted = try_all_sign_conventions(cand, h_cnf)
+                #print(f"DEBUG: try single-literal cand ok={ok} for lit {lit_i}")
+                if ok:
+                    feat_idx = None
+                    try:
+                        feat_idx = rev_hash[lit_abs][0]
+                    except Exception:
+                        pass
+                    if feat_idx is not None and feat_idx not in processed_feats:
+                        processed_feats.add(feat_idx)
+                        resultado_feats.append(feat_idx)
+                    # atualizar teste com a versão que passou (pode ser cand ou cand_inv)
+                    teste = accepted
+                else:
+                    i += 1
+                continue
+
+            feat_idx = rev_hash[lit_abs][0]
+            if feat_idx in processed_feats:
+                i += 1
+                continue
+
             cand = teste.copy()
-            # remover literal = liberar aquela feature
-            cand.pop(i)
-            if self.allows_majority_flip(cand, h_cnf):
-                # se deixar de fixar esse literal permite inverter → relevante
-                resultado.append(teste[i])
-                teste = cand
+            for j, lit in enumerate(cand):
+                lit_abs_j = abs(int(lit))
+                if lit_abs_j in rev_hash and rev_hash[lit_abs_j][0] == feat_idx:
+                    cand[j] = -cand[j]
+
+            ok, accepted = try_all_sign_conventions(cand, h_cnf)
+            #print(f"DEBUG: try feature {feat_idx} cand ok={ok}")
+            if ok:
+                processed_feats.add(feat_idx)
+                resultado_feats.append(feat_idx)
+                teste = accepted
+                i = 0
             else:
-                # se NÃO existe contra-exemplo -> precisa manter esse literal fixado
+                processed_feats.add(feat_idx)
                 i += 1
 
-        # converter para pares (feat_idx, valor original)
+
+        # converter resultado_feats para pares (feat_idx, valor original)
         final = []
         vistos = set()
-        for lit in resultado:
-            lit_abs = abs(int(lit))
-            if lit_abs in rev_hash:
-                feat_idx, _ = rev_hash[lit_abs]
-                if feat_idx not in vistos:
-                    vistos.add(feat_idx)
-                    try:
-                        val = float(instance.iloc[feat_idx])
-                    except Exception:
-                        val = float(instance.loc[feat_idx])
-                    final.append((feat_idx, val))
+        from pandas.api.types import is_integer
 
+        for feat_idx in resultado_feats:
+            if feat_idx in vistos:
+                continue
+            vistos.add(feat_idx)
+            val = None
+            try:
+                # se feat_idx é inteiro posicional usamos iloc; caso contrário tentamos loc
+                if isinstance(feat_idx, (int,)) or (hasattr(feat_idx, 'dtype') and pd.api.types.is_integer_dtype(type(feat_idx))):
+                    val = float(instance.iloc[int(feat_idx)])
+                else:
+                    val = float(instance.loc[feat_idx])
+            except Exception as e:
+                # fallback: tentar acessar por posição convertendo para int se possível
+                try:
+                    val = float(instance.iloc[int(feat_idx)])
+                except Exception as e2:
+                    #print(f"DEBUG: falha ao acessar valor do feature {feat_idx}: {e}; fallback falhou: {e2}")
+                    # pular esse feat_idx — opcional: colocar NaN ou 0
+                    continue
+            final.append((feat_idx, val))
+
+        #print(f"DEBUG: final pairs: {final}")
         return _fmt_pairs_as_z3(final)
+
 
     def __len__(self):
         return sum([len(tree) for tree in self.trees])
